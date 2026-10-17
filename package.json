@@ -3,27 +3,23 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3016",
+    "dev": "next dev -p 3001",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:setup": "node --env-file=.env.local db/setup.mjs"
   },
   "dependencies": {
-    "@capacitor/android": "^7.4.4",
-    "@capacitor/app": "^7.1.0",
-    "@capacitor/cli": "^7.4.4",
-    "@capacitor/core": "^7.4.4",
-    "@capacitor/local-notifications": "^7.0.3",
-    "@supabase/supabase-js": "^2.86.0",
     "next": "^16.0.10",
-    "puppeteer": "^24.31.0",
+    "pg": "^8.23.1",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3"
+    "react-dom": "^19.2.3",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
-    "@capacitor/assets": "^3.0.5",
     "@tailwindcss/postcss": "^4.1.17",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10.4.22",

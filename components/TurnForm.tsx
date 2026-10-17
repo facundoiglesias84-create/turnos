@@ -1,8 +1,17 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import { useAuth } from './AuthContext';
-import { supabase } from '@/lib/supabase';
+import React, { useState, useEffect, useRef } from 'react';
+import { getAll } from '@/lib/data';
+import DateTimePicker, { isCompleteDateTime } from './DateTimePicker';
+import SelectMenu from './SelectMenu';
+
+// ISO timestamp -> local "YYYY-MM-DDTHH:mm"
+const toLocalInput = (iso: string) => {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
 
 interface TurnData {
     clientName: string;
@@ -17,6 +26,7 @@ interface TurnFormProps {
     initialData?: TurnData | null;
     isEditing?: boolean;
     onCancel?: () => void;
+    embedded?: boolean; // rendered inside a sheet: no card chrome or title
 }
 
 interface ServiceItem {
@@ -24,10 +34,11 @@ interface ServiceItem {
     price: number;
 }
 
-export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditing, onCancel }: TurnFormProps) {
-    const { user } = useAuth();
+export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditing, onCancel, embedded }: TurnFormProps) {
     const [clientName, setClientName] = useState('');
     const [dateTime, setDateTime] = useState('');
+    const [dateTimeError, setDateTimeError] = useState('');
+    const [busyTimes, setBusyTimes] = useState<string[]>([]);
 
     // Multi-task state
     const [selectedTasks, setSelectedTasks] = useState<ServiceItem[]>([]);
@@ -36,26 +47,29 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
 
     const [estimatedPrice, setEstimatedPrice] = useState<string>('');
     const [services, setServices] = useState<{ service_name: string; price: number }[]>([]);
+    // When loading a turn for editing, keep its saved price instead of recomputing it from the tasks
+    const keepPriceRef = useRef(false);
 
     useEffect(() => {
-        if (user) {
-            const fetchServices = async () => {
-                const { data } = await supabase
-                    .from('prices')
-                    .select('service_name, price')
-                    .eq('user_id', user.id)
-                    .order('service_name');
+        getAll('turns').then(rows => setBusyTimes(
+            rows
+                .filter(t => !t.paid && t.date_time !== initialData?.dateTime)
+                .map(t => toLocalInput(t.date_time))
+        ));
+    }, [initialData]);
 
-                if (data) {
-                    setServices(data);
-                }
-            };
-            fetchServices();
-        }
-    }, [user]);
+    useEffect(() => {
+        getAll('prices').then(rows => setServices(
+            rows.map(p => ({ service_name: p.service_name, price: p.price }))
+        ));
+    }, []);
 
     // Update total price when tasks change
     useEffect(() => {
+        if (keepPriceRef.current) {
+            keepPriceRef.current = false;
+            return;
+        }
         const total = selectedTasks.reduce((sum, item) => sum + item.price, 0);
         if (total > 0) {
             setEstimatedPrice(total.toString());
@@ -68,18 +82,27 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
     useEffect(() => {
         if (isEditing && initialData) {
             setClientName(initialData.clientName);
-            setDateTime(initialData.dateTime);
-            setEstimatedPrice(initialData.estimatedPrice.toString());
-            // Treating task as custom for simplicity in edit mode
-            setCustomTaskName(initialData.task);
-            setIsAddingCustom(true);
-            setSelectedTasks([]);
+            setDateTime(toLocalInput(initialData.dateTime));
+            setEstimatedPrice(initialData.estimatedPrice ? initialData.estimatedPrice.toString() : '');
+            keepPriceRef.current = true;
+            setSelectedTasks(
+                (initialData.task || '').split('+').map(t => t.trim()).filter(Boolean).map(name => ({
+                    name,
+                    price: services.find(s => s.service_name === name)?.price ?? 0,
+                }))
+            );
+            setCustomTaskName('');
+            setIsAddingCustom(false);
         }
-    }, [isEditing, initialData]);
+    }, [isEditing, initialData, services]);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (!clientName || !dateTime || !estimatedPrice) return;
+        if (!isCompleteDateTime(dateTime)) {
+            setDateTimeError(dateTime.split('T')[0] ? 'Elegí la hora del turno.' : 'Elegí la fecha y la hora del turno.');
+            return;
+        }
+        if (!clientName || !estimatedPrice) return;
 
         // Create a Date object from the local input string
         const localDate = new Date(dateTime);
@@ -93,7 +116,7 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
             clientName,
             dateTime: localDate.toISOString(),
             task: combinedTask,
-            estimatedPrice: parseFloat(estimatedPrice)
+            estimatedPrice: parseFloat(estimatedPrice.replace(',', '.')) || 0
         };
 
         if (isEditing && onUpdateTurn) {
@@ -105,27 +128,11 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
         // Reset form
         setClientName('');
         setDateTime('');
+        setDateTimeError('');
         setSelectedTasks([]);
         setCustomTaskName('');
         setEstimatedPrice('');
         setIsAddingCustom(false);
-    };
-
-    const handleServiceSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const value = e.target.value;
-        if (!value) return;
-
-        if (value === 'custom') {
-            setIsAddingCustom(true);
-            // Don't add yet, wait for user input
-        } else {
-            const service = services.find(s => s.service_name === value);
-            if (service) {
-                addTask({ name: service.service_name, price: service.price });
-            }
-        }
-        // Reset select
-        e.target.value = "";
     };
 
     const addTask = (task: ServiceItem) => {
@@ -147,8 +154,8 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
     };
 
     return (
-        <form onSubmit={handleSubmit} className="glass-card p-6 mb-8 w-full max-w-md mx-auto">
-            <h2 className="text-2xl font-bold mb-6 text-center text-white">{isEditing ? 'Editar Turno' : 'Nuevo Turno'}</h2>
+        <form onSubmit={handleSubmit} className={embedded ? 'w-full' : 'glass-card p-6 mb-8 w-full max-w-md mx-auto'}>
+            {!embedded && <h2 className="text-2xl font-bold mb-6 text-center text-white">{isEditing ? 'Editar Turno' : 'Nuevo Turno'}</h2>}
 
             <div className="mb-5">
                 <label htmlFor="client" className="block text-base font-semibold text-slate-200 mb-2">Cliente *</label>
@@ -163,62 +170,12 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
                 />
             </div>
 
-            <div className="mb-5">
-                <label htmlFor="date" className="block text-base font-semibold text-slate-200 mb-2">Fecha *</label>
-                <input
-                    id="date"
-                    type="date"
-                    value={dateTime.split('T')[0] || ''}
-                    onChange={(e) => {
-                        const time = dateTime.split('T')[1] || '00:00';
-                        setDateTime(`${e.target.value}T${time}`);
-                    }}
-                    required
-                    className="input-field text-lg font-medium"
-                />
-            </div>
-
-            <div className="mb-5 grid grid-cols-2 gap-4">
-                <div>
-                    <label htmlFor="hour" className="block text-base font-semibold text-slate-200 mb-2">Hora *</label>
-                    <select
-                        id="hour"
-                        value={dateTime.split('T')[1]?.split(':')[0] || ''}
-                        onChange={(e) => {
-                            const date = dateTime.split('T')[0] || '';
-                            const minute = dateTime.split('T')[1]?.split(':')[1] || '00';
-                            setDateTime(`${date}T${e.target.value}:${minute}`);
-                        }}
-                        required
-                        className="input-field text-lg font-medium"
-                    >
-                        <option value="">--</option>
-                        {Array.from({ length: 24 }, (_, i) => {
-                            const hour = i.toString().padStart(2, '0');
-                            return <option key={hour} value={hour}>{hour}</option>;
-                        })}
-                    </select>
-                </div>
-                <div>
-                    <label htmlFor="minute" className="block text-base font-semibold text-slate-200 mb-2">Minutos *</label>
-                    <select
-                        id="minute"
-                        value={dateTime.split('T')[1]?.split(':')[1] || ''}
-                        onChange={(e) => {
-                            const date = dateTime.split('T')[0] || '';
-                            const hour = dateTime.split('T')[1]?.split(':')[0] || '00';
-                            setDateTime(`${date}T${hour}:${e.target.value}`);
-                        }}
-                        required
-                        className="input-field text-lg font-medium"
-                    >
-                        <option value="">--</option>
-                        {['00', '05', '10', '15', '20', '25', '30', '35', '40', '45', '50', '55'].map(min => (
-                            <option key={min} value={min}>{min}</option>
-                        ))}
-                    </select>
-                </div>
-            </div>
+            <DateTimePicker
+                value={dateTime}
+                onChange={(v) => { setDateTime(v); setDateTimeError(''); }}
+                busyTimes={busyTimes}
+                error={dateTimeError}
+            />
 
             <div className="mb-5">
                 <label className="block text-base font-semibold text-slate-200 mb-2">Tareas</label>
@@ -241,19 +198,23 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
 
                 {/* Task Selector */}
                 {!isAddingCustom ? (
-                    <select
-                        onChange={handleServiceSelect}
-                        className="input-field text-lg font-medium"
-                        defaultValue=""
-                    >
-                        <option value="" disabled>Agregar servicio...</option>
-                        {services.map((service, index) => (
-                            <option key={index} value={service.service_name}>
-                                {service.service_name} (${service.price})
-                            </option>
-                        ))}
-                        <option value="custom" className="font-bold text-purple-400">+ Otra tarea...</option>
-                    </select>
+                    <SelectMenu
+                        label="Agregar servicio"
+                        icon={
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-6 h-6 text-purple-400" aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                        }
+                        items={[
+                            ...services.map(service => ({
+                                key: service.service_name,
+                                label: service.service_name,
+                                detail: `$${service.price.toLocaleString('es-AR')}`,
+                                onSelect: () => addTask({ name: service.service_name, price: service.price }),
+                            })),
+                            { key: 'custom', label: '+ Otra tarea...', accent: true, onSelect: () => setIsAddingCustom(true) },
+                        ]}
+                    />
                 ) : (
                     <div className="flex gap-2">
                         <input
@@ -266,23 +227,31 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
                                     addCustomTask();
                                 }
                             }}
-                            className="input-field text-lg font-medium"
+                            className="input-field !mb-0 flex-1 min-w-0 text-lg font-medium"
                             placeholder="Escribir tarea..."
+                            aria-label="Nombre de la tarea"
                             autoFocus
                         />
                         <button
                             type="button"
                             onClick={addCustomTask}
-                            className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
+                            disabled={!customTaskName.trim()}
+                            aria-label="Agregar tarea"
+                            className="btn-primary !p-0 w-12 shrink-0 flex items-center justify-center disabled:opacity-40 disabled:pointer-events-none"
                         >
-                            OK
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5" aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                            </svg>
                         </button>
                         <button
                             type="button"
-                            onClick={() => setIsAddingCustom(false)}
-                            className="px-4 py-2 text-slate-300 hover:text-white bg-slate-700 rounded-lg transition-colors text-lg"
+                            onClick={() => { setIsAddingCustom(false); setCustomTaskName(''); }}
+                            aria-label="Cancelar"
+                            className="w-12 shrink-0 flex items-center justify-center rounded-xl border border-slate-700 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
                         >
-                            ✕
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5" aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
                         </button>
                     </div>
                 )}
@@ -290,17 +259,20 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
 
             <div className="mb-8">
                 <label htmlFor="price" className="block text-base font-semibold text-slate-200 mb-2">Precio Total Estimado *</label>
-                <input
-                    id="price"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={estimatedPrice}
-                    onChange={(e) => setEstimatedPrice(e.target.value)}
-                    required
-                    className="input-field text-xl font-bold text-green-400"
-                    placeholder="0.00"
-                />
+                <div className="relative">
+                    <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-xl font-bold text-slate-400" aria-hidden="true">$</span>
+                    <input
+                        id="price"
+                        type="text"
+                        inputMode="decimal"
+                        autoComplete="off"
+                        value={estimatedPrice}
+                        onChange={(e) => setEstimatedPrice(e.target.value.replace(/[^\d.,]/g, ''))}
+                        required
+                        className="input-field !mb-0 !pl-9 text-xl font-bold text-green-400 tabular-nums"
+                        placeholder="0"
+                    />
+                </div>
             </div>
 
             <div className="flex gap-2">
@@ -308,16 +280,22 @@ export default function TurnForm({ onAddTurn, onUpdateTurn, initialData, isEditi
                     <button
                         type="button"
                         onClick={onCancel}
-                        className="flex-1 bg-slate-700 text-slate-300 hover:text-white hover:bg-slate-600 rounded-lg py-3 font-bold transition-colors"
+                        className="flex-1 h-12 rounded-xl bg-slate-800 border border-slate-700 text-slate-100 font-semibold active:bg-slate-700 transition-colors"
                     >
                         Cancelar
                     </button>
                 )}
-                <button type="submit" className="flex-1 btn-primary flex justify-center items-center gap-2 text-lg py-3 font-bold">
-                    <span>{isEditing ? 'Guardar Cambios' : 'Agendar Turno'}</span>
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                    </svg>
+                <button type="submit" className={isEditing
+                    ? 'flex-1 h-12 rounded-xl bg-purple-600 text-white font-semibold active:bg-purple-700 transition-colors'
+                    : 'flex-1 h-12 btn-primary flex justify-center items-center gap-2 text-lg font-bold'}>
+                    {isEditing ? 'Guardar' : (
+                        <>
+                            Agendar Turno
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6" aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                            </svg>
+                        </>
+                    )}
                 </button>
             </div>
         </form>

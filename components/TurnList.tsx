@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import Sheet from './Sheet';
+import ConfirmDialog from './ConfirmDialog';
 
 export interface Turn {
     id: string;
-    userId: string;
     clientName: string;
     dateTime: string;
     task?: string;
@@ -48,81 +49,13 @@ export default function TurnList({
     onUpdateTask,
     onUpdateTurnData
 }: TurnListProps) {
-    const [editingId, setEditingId] = useState<string | null>(null);
-    const [editPrice, setEditPrice] = useState<string>('');
-
-    const [editingDepositId, setEditingDepositId] = useState<string | null>(null);
-    const [editDepositValue, setEditDepositValue] = useState<string>('');
-
-    // Task Edit State
-    const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-    const [editTaskValue, setEditTaskValue] = useState<string>('');
-    const [editTaskPrice, setEditTaskPrice] = useState<number>(0);
-
-    // Reminder Modal State
-    const [reminderModalOpen, setReminderModalOpen] = useState<string | null>(null);
-    const [reminderDate, setReminderDate] = useState('');
-    const [reminderTime, setReminderTime] = useState('');
+    // Turn pending delete confirmation
+    const [turnToDelete, setTurnToDelete] = useState<Turn | null>(null);
 
     // Reschedule Modal State
     const [rescheduleModalOpen, setRescheduleModalOpen] = useState<string | null>(null);
     const [rescheduleDate, setRescheduleDate] = useState('');
     const [rescheduleTime, setRescheduleTime] = useState('');
-
-    // ... (rest of the state)
-
-    const startEditingTask = (turn: Turn) => {
-        setEditingTaskId(turn.id);
-        setEditTaskValue(turn.task || '');
-        setEditTaskPrice(turn.estimatedPrice || 0);
-    };
-
-    const cancelEditingTask = () => {
-        setEditingTaskId(null);
-        setEditTaskValue('');
-        setEditTaskPrice(0);
-    };
-
-    const saveTask = (id: string) => {
-        if (onUpdateTurnData) {
-            onUpdateTurnData(id, { task: editTaskValue, price: editTaskPrice });
-            setEditingTaskId(null);
-        } else if (onUpdateTask) {
-            // Fallback
-            onUpdateTask(id, editTaskValue);
-            setEditingTaskId(null);
-        }
-    };
-
-    // Helper to add a service
-    const addServiceToTask = (serviceName: string, servicePrice: number) => {
-        const currentTasks = editTaskValue ? editTaskValue.split('+').map(t => t.trim()) : [];
-        if (!currentTasks.includes(serviceName)) {
-            const newTasks = [...currentTasks, serviceName].join(' + ');
-            setEditTaskValue(prefixPlus(newTasks));
-            setEditTaskPrice(prev => prev + servicePrice);
-        }
-    };
-
-    // Helper to ensure proper formatting
-    const prefixPlus = (str: string) => {
-        // Just return as is, the turn list rendering handles the + splitting or adding bullets
-        // But the previous implementation split by +, so we just join by +
-        return str;
-    };
-
-    // Helper to remove a service
-    const removeServiceFromTask = (serviceName: string) => {
-        const currentTasks = editTaskValue ? editTaskValue.split('+').map(t => t.trim()) : [];
-        const newTasks = currentTasks.filter(t => t !== serviceName);
-        setEditTaskValue(newTasks.join(' + '));
-
-        // Find price to subtract (approximate if not exact match in prices list, but fine for now)
-        const priceObj = prices?.find(p => p.service_name === serviceName);
-        if (priceObj) {
-            setEditTaskPrice(prev => Math.max(0, prev - priceObj.price));
-        }
-    };
 
     // In-App Notification State
     const [activeNotification, setActiveNotification] = useState<Turn | null>(null);
@@ -225,68 +158,6 @@ export default function TurnList({
         return date.toLocaleDateString('es-AR', { weekday: 'long' });
     };
 
-    const startEditing = (turn: Turn) => {
-        setEditingId(turn.id);
-        setEditPrice(turn.estimatedPrice?.toString() || '');
-    };
-
-    const cancelEditing = () => {
-        setEditingId(null);
-        setEditPrice('');
-    };
-
-    const savePrice = (id: string) => {
-        if (onUpdatePrice && editPrice) {
-            onUpdatePrice(id, parseFloat(editPrice));
-            setEditingId(null);
-        }
-    };
-
-    const startEditingDeposit = (turn: Turn) => {
-        setEditingDepositId(turn.id);
-        setEditDepositValue(turn.deposit?.toString() || '');
-    };
-
-    const cancelEditingDeposit = () => {
-        setEditingDepositId(null);
-        setEditDepositValue('');
-    };
-
-    const saveDeposit = (id: string) => {
-        if (onUpdateDeposit && editDepositValue) {
-            onUpdateDeposit(id, parseFloat(editDepositValue));
-            setEditingDepositId(null);
-        }
-    };
-
-    const openReminderModal = (turn: Turn) => {
-        setReminderModalOpen(turn.id);
-        const turnDate = new Date(turn.dateTime);
-        turnDate.setHours(turnDate.getHours() - 1);
-
-        const localIso = new Date(turnDate.getTime() - (turnDate.getTimezoneOffset() * 60000)).toISOString();
-        setReminderDate(localIso.split('T')[0]);
-
-        let minutes = Math.round(turnDate.getMinutes() / 5) * 5;
-        if (minutes === 60) minutes = 55;
-        const hours = turnDate.getHours().toString().padStart(2, '0');
-        const mins = minutes.toString().padStart(2, '0');
-
-        setReminderTime(`${hours}:${mins}`);
-    };
-
-    const saveReminder = () => {
-        if (reminderModalOpen && onSetReminder) {
-            const fullDate = new Date(`${reminderDate}T${reminderTime}`);
-            onSetReminder(reminderModalOpen, fullDate.toISOString());
-            setReminderModalOpen(null);
-
-            if ('Notification' in window && Notification.permission === 'default') {
-                Notification.requestPermission();
-            }
-        }
-    };
-
     const openRescheduleModal = (turn: Turn) => {
         setRescheduleModalOpen(turn.id);
         const dateObj = new Date(turn.dateTime);
@@ -305,8 +176,8 @@ export default function TurnList({
 
     if (turns.length === 0) {
         return (
-            <div className="text-center text-slate-300 mt-8 p-6 glass-card text-lg">
-                <p>No hay turnos agendados.</p>
+            <div className="rounded-2xl border border-dashed border-slate-700 py-10 text-center text-slate-400">
+                No hay turnos agendados.
             </div>
         );
     }
@@ -315,7 +186,6 @@ export default function TurnList({
 
     return (
         <div className="w-full space-y-4">
-            <h2 className="text-2xl font-bold text-white mb-6">Próximos Turnos</h2>
 
             {/* In-App Notification Banner */}
             {activeNotification && (
@@ -335,7 +205,8 @@ export default function TurnList({
                             </div>
                             <button
                                 onClick={handleDismissNotification}
-                                className="text-white/70 hover:text-white p-1"
+                                aria-label="Cerrar recordatorio"
+                                className="text-white/70 hover:text-white p-2 -m-1"
                             >
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
                                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -355,366 +226,146 @@ export default function TurnList({
                 </div>
             )}
 
-            {sortedTurns.map((turn) => (
-                <div key={turn.id} className="glass-card relative overflow-hidden transition-all hover:scale-[1.01] border border-slate-700/50 bg-[#1e1e30]">
-                    {/* Status Indicator Stripe */}
-                    <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${turn.completed === true ? 'bg-green-500' :
-                        turn.completed === false ? 'bg-red-500' : 'bg-purple-500'
-                        }`}></div>
+            {sortedTurns.map((turn) => {
+                const date = new Date(turn.dateTime);
+                const relative = getRelativeDateLabel(turn.dateTime);
+                const isSoon = relative === 'Hoy' || relative === 'Mañana';
 
-                    <div className="p-4 pl-6">
-                        {/* Header: Name and Time */}
-                        <div className="flex justify-between items-start mb-2">
-                            <div>
-                                <h3 className="font-bold text-2xl text-white tracking-wide">{turn.clientName}</h3>
-                                <div className="flex items-center gap-2 mt-1">
-                                    <span className={`text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-md ${getRelativeDateLabel(turn.dateTime) === 'Hoy' ? 'bg-green-900/40 text-green-400' :
-                                        getRelativeDateLabel(turn.dateTime) === 'Mañana' ? 'bg-blue-900/40 text-blue-400' :
-                                            'bg-slate-700 text-slate-400'
-                                        }`}>
-                                        {getRelativeDateLabel(turn.dateTime)}
-                                    </span>
-                                    <span className="text-slate-400 text-sm capitalize font-medium">
-                                        {new Date(turn.dateTime).toLocaleDateString('es-AR', { day: 'numeric', month: 'short' })}
-                                    </span>
-                                </div>
-                            </div>
-                            <div className="flex flex-col items-end">
-                                <span className="text-3xl font-bold text-white leading-none">
-                                    {new Date(turn.dateTime).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                return (
+                    <article key={turn.id} className="rounded-2xl bg-[#1e1e32] border border-slate-600/40 ring-1 ring-white/[0.03] shadow-[0_12px_28px_rgba(0,0,0,0.45)]">
+                        {/* Date strip */}
+                        <div className="flex items-center justify-between gap-3 px-4 py-3.5 rounded-t-2xl border-b border-purple-400/20 bg-gradient-to-r from-purple-700/50 via-purple-600/25 to-indigo-600/10 shadow-[inset_0_-1px_0_rgba(0,0,0,0.25)]">
+                            <div className="flex items-center gap-2 min-w-0">
+                                {isSoon && (
+                                    <span className="shrink-0 px-2 py-0.5 rounded-full bg-white/15 text-xs font-bold text-white">{relative}</span>
+                                )}
+                                <span className="text-[17px] font-bold text-white truncate [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">
+                                    {date.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' }).replace(/^./, c => c.toUpperCase())}
                                 </span>
-                                <span className="text-xs text-slate-500 font-bold uppercase mt-1">Hora</span>
+                            </div>
+                            <span className="shrink-0 text-[28px] leading-none font-extrabold text-white tabular-nums [text-shadow:0_2px_6px_rgba(0,0,0,0.6)]">
+                                {date.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                            </span>
+                        </div>
+
+                        {/* Info */}
+                        <div className="px-4 pt-3 pb-4">
+                            <h3 className="text-lg font-bold text-white leading-snug break-words">{turn.clientName}</h3>
+                            <div className="mt-1 flex items-end justify-between gap-3">
+                                <p className="text-sm text-slate-300 break-words">
+                                    {turn.task ? turn.task.split('+').map(t => t.trim()).join(' · ') : 'Sin detalle'}
+                                </p>
+                                <p className="shrink-0 text-lg font-bold text-white tabular-nums">
+                                    {turn.estimatedPrice ? formatPrice(turn.estimatedPrice) : '—'}
+                                </p>
                             </div>
                         </div>
 
-                        {/* Divider */}
-                        <div className="h-px bg-slate-700/50 my-3 w-full"></div>
-
-                        {/* Info Grid: Tarea and Money */}
-                        <div className="grid grid-cols-[1.2fr_1fr] gap-4 mb-4">
-                            <div>
-                                <div className="flex justify-between items-center mb-1">
-                                    <span className="text-xs text-slate-500 font-bold uppercase block">Tarea</span>
-                                    {(onUpdateTask || onUpdateTurnData) && editingTaskId !== turn.id && (
-                                        <button
-                                            onClick={() => startEditingTask(turn)}
-                                            className="text-[10px] bg-purple-500/10 text-purple-300 hover:bg-purple-500 hover:text-white px-2 py-0.5 rounded transition-all border border-purple-500/20 font-bold uppercase tracking-wider"
-                                        >
-                                            Editar Tareas
-                                        </button>
-                                    )}
-                                </div>
-
-                                {editingTaskId === turn.id ? (
-                                    <div className="flex flex-col gap-3 bg-slate-800/50 p-2 rounded-lg border border-slate-700">
-
-                                        {/* Dropdown for adding services */}
-                                        <select
-                                            className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white text-sm outline-none"
-                                            onChange={(e) => {
-                                                const selected = prices?.find(p => p.id === e.target.value);
-                                                if (selected) {
-                                                    addServiceToTask(selected.service_name, selected.price);
-                                                    e.target.value = ""; // Reset dropdown
-                                                }
-                                            }}
-                                            defaultValue=""
-                                        >
-                                            <option value="" disabled>+ Agregar servicio...</option>
-                                            {prices?.map(p => (
-                                                <option key={p.id} value={p.id}>{p.service_name} (${p.price})</option>
-                                            ))}
-                                        </select>
-
-                                        {/* Selected Chips */}
-                                        <div className="flex flex-wrap gap-2">
-                                            {editTaskValue.split('+').filter(t => t.trim()).map((t, i) => (
-                                                <div key={i} className="flex items-center gap-1 bg-purple-900/40 text-purple-200 px-2 py-1 rounded text-xs border border-purple-500/30">
-                                                    <span>{t.trim()}</span>
-                                                    <button onClick={() => removeServiceFromTask(t.trim())} className="text-purple-400 hover:text-white">×</button>
-                                                </div>
-                                            ))}
-                                            {!editTaskValue && <span className="text-slate-500 text-xs italic">Sin tareas seleccionadas</span>}
-                                        </div>
-
-                                        {/* Price Preview */}
-                                        <div className="flex justify-between items-center border-t border-slate-700/50 pt-2">
-                                            <span className="text-xs text-slate-400">Nuevo Total:</span>
-                                            <span className="font-bold text-green-400">${editTaskPrice.toLocaleString('es-AR')}</span>
-                                        </div>
-
-                                        <div className="flex justify-end gap-2 mt-1">
-                                            <button onClick={cancelEditingTask} className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg transition-colors">Cancelar</button>
-                                            <button onClick={() => saveTask(turn.id)} className="text-xs bg-purple-600 hover:bg-purple-500 text-white px-3 py-1.5 rounded-lg font-bold transition-colors">Guardar</button>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    turn.task ? (
-                                        <ul className="text-slate-200 font-medium text-sm space-y-1.5">
-                                            {turn.task.split('+').map((t, i) => (
-                                                <li key={i} className="flex items-start gap-2 leading-tight">
-                                                    <span className="text-purple-400 mt-[3px] text-[10px]">●</span>
-                                                    <span className="break-words">{t.trim()}</span>
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    ) : (
-                                        <p className="text-slate-200 font-medium leading-tight text-sm">Sin detalle</p>
-                                    )
-                                )}
-                            </div>
-
-                            {/* Money Section (Right Side) */}
-                            <div className="flex flex-col gap-2">
-                                {/* Price */}
-                                <div className="flex justify-between items-center group cursor-pointer p-1 rounded hover:bg-white/5 transition-colors" onClick={() => startEditing(turn)}>
-                                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">PRECIO</span>
-                                    <div className="flex items-center gap-1.5">
-                                        {editingId === turn.id ? (
-                                            <div className="flex items-center gap-1">
-                                                <input
-                                                    type="number"
-                                                    value={editPrice}
-                                                    onChange={(e) => setEditPrice(e.target.value)}
-                                                    className="w-20 px-1 py-0.5 text-sm bg-slate-900 border border-purple-500 rounded text-white text-right"
-                                                    autoFocus
-                                                    onClick={(e) => e.stopPropagation()}
-                                                />
-                                                <button onClick={(e) => { e.stopPropagation(); savePrice(turn.id); }} className="text-green-400">✓</button>
-                                            </div>
-                                        ) : (
-                                            <>
-                                                <span className="text-white font-bold text-lg tracking-tight">
-                                                    {turn.estimatedPrice ? formatPrice(turn.estimatedPrice) : '-'}
-                                                </span>
-                                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 text-slate-600 group-hover:text-purple-400 transition-colors"><path d="M5.433 13.917l1.262-3.155A4 4 0 017.58 9.42l6.92-6.918a2.121 2.121 0 013 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 01-.65-.65z" /><path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0010 3H4.75A2.75 2.75 0 002 5.75v9.5A2.75 2.75 0 004.75 18h9.5A2.75 2.75 0 0017 15.25V10a.75.75 0 00-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5z" /></svg>
-                                            </>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* Deposit / Seña */}
-                                <div className="flex justify-between items-center group cursor-pointer p-1 rounded hover:bg-white/5 transition-colors" onClick={() => startEditingDeposit(turn)}>
-                                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">SEÑA</span>
-                                    <div className="flex items-center gap-1.5">
-                                        {editingDepositId === turn.id ? (
-                                            <div className="flex items-center gap-1">
-                                                <input type="number" value={editDepositValue} onChange={e => setEditDepositValue(e.target.value)} className="w-16 bg-slate-900 border border-slate-600 rounded px-1 py-0.5 text-right text-white text-sm" onClick={(e) => e.stopPropagation()} autoFocus />
-                                                <button onClick={(e) => { e.stopPropagation(); saveDeposit(turn.id); }} className="text-green-400">✓</button>
-                                            </div>
-                                        ) : (
-                                            <>
-                                                <span className={`${turn.deposit ? 'text-white' : 'text-slate-500'} font-bold text-base tracking-tight`}>
-                                                    {turn.deposit ? formatPrice(turn.deposit) : '$0'}
-                                                </span>
-                                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 text-slate-600 group-hover:text-purple-400 transition-colors"><path d="M5.433 13.917l1.262-3.155A4 4 0 017.58 9.42l6.92-6.918a2.121 2.121 0 013 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 01-.65-.65z" /><path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0010 3H4.75A2.75 2.75 0 002 5.75v9.5A2.75 2.75 0 004.75 18h9.5A2.75 2.75 0 0017 15.25V10a.75.75 0 00-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5z" /></svg>
-                                            </>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* Balance */}
-                                <div className="flex justify-between items-center pt-2 border-t border-slate-700/50 mt-1">
-                                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">FALTA</span>
-                                    <div className={`font-bold ${(turn.estimatedPrice || 0) - (turn.deposit || 0) <= 0 ? 'text-green-500' : 'text-red-400'}`}>
-                                        {formatPrice(Math.max(0, (turn.estimatedPrice || 0) - (turn.deposit || 0)))}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Actions Footer */}
-                        <div className="flex items-center justify-between pt-3 border-t border-slate-700/50">
-                            {/* Status Toggles (Compact) */}
-                            <div className="flex bg-slate-800/80 rounded-lg p-1 gap-1">
-                                {turn.completed ? (
-                                    <>
-                                        <button
-                                            onClick={() => onStatusChange(turn.id, false)}
-                                            className="px-3 py-1.5 rounded-md text-xs font-bold text-slate-400 hover:text-white transition-all bg-slate-700/50"
-                                        >
-                                            ↩ Volver
-                                        </button>
-                                        <button
-                                            onClick={() => onPaidChange && onPaidChange(turn.id, true)}
-                                            className="px-3 py-1.5 rounded-md text-xs font-bold transition-all bg-purple-600 text-white shadow-md hover:bg-purple-500 animate-pulse-slow"
-                                        >
-                                            $ Cobrar
-                                        </button>
-                                    </>
-                                ) : (
-                                    <>
-                                        <button
-                                            onClick={() => onStatusChange(turn.id, true)}
-                                            className="px-3 py-1.5 rounded-md text-xs font-bold transition-all text-slate-400 hover:text-white hover:bg-green-600/20 hover:text-green-400"
-                                        >
-                                            ✓ Listo
-                                        </button>
-                                        <button
-                                            onClick={() => onStatusChange(turn.id, false)}
-                                            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${turn.completed === false ? 'text-red-400' : 'text-slate-400 hover:text-white hover:bg-red-600/20 hover:text-red-400'}`}
-                                        >
-                                            ✕ No
-                                        </button>
-                                    </>
-                                )}
-                            </div>
-
-                            {/* Secondary Actions */}
-                            <div className="flex items-center gap-1">
-                                {/* WhatsApp Reminder */}
-                                <button
-                                    onClick={() => openWhatsApp(turn)}
-                                    className="p-2 text-slate-400 hover:text-green-400 hover:bg-slate-800 rounded-full transition-colors"
-                                    title="Enviar mensaje"
-                                >
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5"><path d="M12.004 2C6.48 2 2 6.48 2 12.004c0 1.77.46 3.43 1.256 4.89L2 22l5.256-1.256A9.956 9.956 0 0012.004 22c5.524 0 10.004-4.48 10.004-10.004C22.008 6.48 17.528 2 12.004 2zm5.352 14.288c-.22.616-1.268 1.132-1.74 1.16-.472.028-1.084.14-3.792-.932-3.32-1.312-5.46-4.72-5.624-4.94-.164-.22-1.344-1.788-1.344-3.412 0-1.624.848-2.42 1.152-2.752.304-.332.66-.416.88-.416.22 0 .44.004.632.008.2.004.472-.076.74.568.28.672.944 2.304 1.024 2.472.08.168.136.364.028.58-.108.216-.164.352-.324.536-.16.184-.336.412-.48.556-.16.16-.328.336-.14.656.188.32.836 1.364 1.792 2.216 1.224 1.092 2.256 1.436 2.576 1.572.32.136.508.112.7-.108.192-.22.824-.956 1.044-1.284.22-.328.44-.276.74-.164.3.112 1.904.896 2.232 1.06.328.164.548.244.628.38.08.136.08.792-.14 1.408z" /></svg>
-                                </button>
-                                {/* Local Reminder Notifications */}
-                                {onSetReminder && !turn.completed && (
+                        {/* Status */}
+                        <div className="grid grid-cols-2 gap-2 px-4">
+                            {turn.completed ? (
+                                <>
                                     <button
-                                        onClick={() => openReminderModal(turn)}
-                                        className={`p-2 rounded-full transition-colors ${turn.reminderTime ? 'text-yellow-400 bg-yellow-900/10' : 'text-slate-400 hover:text-yellow-400 hover:bg-slate-800'}`}
+                                        onClick={() => onStatusChange(turn.id, false)}
+                                        className="h-11 rounded-xl border border-slate-700 text-sm font-semibold text-slate-200 active:scale-[0.97] active:bg-slate-800 transition"
                                     >
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill={turn.reminderTime ? "currentColor" : "none"} viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" /></svg>
+                                        Deshacer
                                     </button>
-                                )}
-                                {/* Reschedule */}
-                                {onReschedule && (
-                                    <button onClick={() => openRescheduleModal(turn)} className="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-full transition-colors" title="Reprogramar">
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5m-9-6h.008v.008H12v-.008zM12 15h.008v.008H12V15zm0 2.25h.008v.008H12v-.008zM9.75 15h.008v.008H9.75V15zm0 2.25h.008v.008H9.75v-.008zM7.5 15h.008v.008H7.5V15zm0 2.25h.008v.008H7.5v-.008zM14.25 15h.008v.008H14.25V15zm0 2.25h.008v.008H14.25v-.008zM16.5 15h.008v.008H16.5V15zm0 2.25h.008v.008H16.5v-.008z" /></svg>
+                                    <button
+                                        onClick={() => onPaidChange && onPaidChange(turn.id, true)}
+                                        className="h-11 rounded-xl bg-purple-600 text-sm font-semibold text-white active:scale-[0.97] active:bg-purple-700 transition"
+                                    >
+                                        Cobrar
                                     </button>
-                                )}
-                                {/* Delete */}
-                                <button onClick={() => onDelete(turn.id)} className="p-2 text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded-full transition-colors" title="Eliminar">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            ))}
-
-            {/* Reminder Modal */}
-            {reminderModalOpen && (
-                <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
-                    <div className="bg-slate-800 rounded-2xl p-6 w-full max-w-sm border border-slate-700 shadow-2xl">
-                        <h3 className="text-xl font-bold text-white mb-4">Programar Recordatorio</h3>
-                        <p className="text-slate-400 mb-6 text-sm">
-                            Elige cuándo quieres recibir la notificación para avisarle al cliente.
-                        </p>
-
-                        <div className="space-y-4 mb-6">
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Fecha</label>
-                                <input
-                                    type="date"
-                                    value={reminderDate}
-                                    onChange={(e) => setReminderDate(e.target.value)}
-                                    className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-purple-500 outline-none"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Hora (24hs)</label>
-                                <div className="flex gap-2">
-                                    <select
-                                        value={reminderTime.split(':')[0] || '00'}
-                                        onChange={(e) => {
-                                            const minutes = reminderTime.split(':')[1] || '00';
-                                            setReminderTime(`${e.target.value}:${minutes}`);
-                                        }}
-                                        className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-purple-500 outline-none appearance-none text-center font-bold text-lg"
+                                </>
+                            ) : (
+                                <>
+                                    <button
+                                        onClick={() => onStatusChange(turn.id, false)}
+                                        aria-pressed={turn.completed === false}
+                                        className={`h-11 rounded-xl border text-sm font-semibold active:scale-[0.97] transition ${turn.completed === false ? 'bg-rose-500/10 border-rose-500/40 text-rose-300' : 'border-slate-700 text-slate-200 active:bg-slate-800'}`}
                                     >
-                                        {Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0')).map(hour => (
-                                            <option key={hour} value={hour}>{hour}</option>
-                                        ))}
-                                    </select>
-                                    <span className="text-2xl text-slate-500">:</span>
-                                    <select
-                                        value={reminderTime.split(':')[1] || '00'}
-                                        onChange={(e) => {
-                                            const hours = reminderTime.split(':')[0] || '00';
-                                            setReminderTime(`${hours}:${e.target.value}`);
-                                        }}
-                                        className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-purple-500 outline-none appearance-none text-center font-bold text-lg"
+                                        No vino
+                                    </button>
+                                    <button
+                                        onClick={() => onStatusChange(turn.id, true)}
+                                        className="h-11 rounded-xl bg-emerald-600/90 text-sm font-semibold text-white active:scale-[0.97] active:bg-emerald-700 transition"
                                     >
-                                        {Array.from({ length: 12 }, (_, i) => (i * 5).toString().padStart(2, '0')).map(min => (
-                                            <option key={min} value={min}>{min}</option>
-                                        ))}
-                                    </select>
-                                </div>
-                            </div>
+                                        Listo
+                                    </button>
+                                </>
+                            )}
                         </div>
 
-                        <div className="flex flex-col gap-3">
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={() => setReminderModalOpen(null)}
-                                    className="flex-1 py-2 px-4 rounded-lg bg-slate-700 text-white hover:bg-slate-600 transition-colors"
-                                >
-                                    Cancelar
-                                </button>
-                                <button
-                                    onClick={saveReminder}
-                                    className="flex-1 py-2 px-4 rounded-lg bg-purple-600 text-white hover:bg-purple-500 transition-colors font-bold"
-                                >
-                                    Guardar
-                                </button>
-                            </div>
+                        {/* Secondary actions: small visuals, full-height (44px) hit areas */}
+                        <div className="mt-3 grid grid-cols-[1fr_1fr_1fr_48px] border-t border-slate-700/60 divide-x divide-slate-700/60">
+                            <CardAction label="WhatsApp" onClick={() => openWhatsApp(turn)} ariaLabel={`Enviar WhatsApp a ${turn.clientName}`}>
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-[18px] h-[18px]" aria-hidden="true"><path d="M12.004 2C6.48 2 2 6.48 2 12.004c0 1.77.46 3.43 1.256 4.89L2 22l5.256-1.256A9.956 9.956 0 0012.004 22c5.524 0 10.004-4.48 10.004-10.004C22.008 6.48 17.528 2 12.004 2zm5.352 14.288c-.22.616-1.268 1.132-1.74 1.16-.472.028-1.084.14-3.792-.932-3.32-1.312-5.46-4.72-5.624-4.94-.164-.22-1.344-1.788-1.344-3.412 0-1.624.848-2.420 1.152-2.752.304-.332.66-.416.88-.416.22 0 .44.004.632.008.2.004.472-.076.74.568.28.672.944 2.304 1.024 2.472.08.168.136.364.028.58-.108.216-.164.352-.324.536-.16.184-.336.412-.48.556-.16.16-.328.336-.14.656.188.32.836 1.364 1.792 2.216 1.224 1.092 2.256 1.436 2.576 1.572.32.136.508.112.7-.108.192-.22.824-.956 1.044-1.284.22-.328.44-.276.74-.164.3.112 1.904.896 2.232 1.060.328.164.548.244.628.38.08.136.08.792-.14 1.408z" /></svg>
+                            </CardAction>
+                            {onReschedule && (
+                                <CardAction label="Reagendar" onClick={() => openRescheduleModal(turn)} ariaLabel="Reagendar turno">
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-[18px] h-[18px]" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" /></svg>
+                                </CardAction>
+                            )}
+                            {onEditTurn && (
+                                <CardAction label="Editar" onClick={() => onEditTurn(turn)} ariaLabel={`Editar turno de ${turn.clientName}`}>
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-[18px] h-[18px]" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125" /></svg>
+                                </CardAction>
+                            )}
+                            <button
+                                onClick={() => setTurnToDelete(turn)}
+                                aria-label={`Eliminar turno de ${turn.clientName}`}
+                                className="h-11 flex items-center justify-center rounded-br-2xl text-rose-400 active:bg-rose-500/15 active:text-rose-300 transition-colors"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-[18px] h-[18px]" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+                            </button>
                         </div>
+                    </article>
+                );
+            })}
+
+            <ConfirmDialog
+                open={!!turnToDelete}
+                title="¿Eliminar turno?"
+                message={turnToDelete ? `Se borrará el turno de ${turnToDelete.clientName}. No se puede deshacer.` : undefined}
+                confirmLabel="Eliminar"
+                onCancel={() => setTurnToDelete(null)}
+                onConfirm={() => {
+                    if (turnToDelete) onDelete(turnToDelete.id);
+                    setTurnToDelete(null);
+                }}
+            />
+
+            {/* Reagendar */}
+            <Sheet open={!!rescheduleModalOpen} title="Reagendar turno" onClose={() => setRescheduleModalOpen(null)}>
+                <div className="grid grid-cols-[1.4fr_1fr] gap-3">
+                    <div>
+                        <label htmlFor="reschedule-date" className="block text-sm font-semibold text-slate-300 mb-1.5">Fecha</label>
+                        <input id="reschedule-date" type="date" value={rescheduleDate} onChange={(e) => setRescheduleDate(e.target.value)} className="input-field !mb-0" />
+                    </div>
+                    <div>
+                        <label htmlFor="reschedule-time" className="block text-sm font-semibold text-slate-300 mb-1.5">Hora</label>
+                        <input id="reschedule-time" type="time" step={300} value={rescheduleTime} onChange={(e) => setRescheduleTime(e.target.value)} className="input-field !mb-0" />
                     </div>
                 </div>
-            )}
-
-            {/* Reschedule Modal */}
-            {rescheduleModalOpen && (
-                <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
-                    <div className="bg-slate-800 rounded-2xl p-6 w-full max-w-sm border border-slate-700 shadow-2xl">
-                        <h3 className="text-xl font-bold text-white mb-4">Reprogramar Turno</h3>
-                        <p className="text-slate-400 mb-6 text-sm">
-                            Selecciona la nueva fecha y hora para el turno.
-                        </p>
-
-                        <div className="space-y-4 mb-6">
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Nueva Fecha</label>
-                                <input
-                                    type="date"
-                                    value={rescheduleDate}
-                                    onChange={(e) => setRescheduleDate(e.target.value)}
-                                    className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-purple-500 outline-none"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Nueva Hora</label>
-                                <input
-                                    type="time"
-                                    value={rescheduleTime}
-                                    onChange={(e) => setRescheduleTime(e.target.value)}
-                                    className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-purple-500 outline-none"
-                                />
-                            </div>
-                        </div>
-
-                        <div className="flex flex-col gap-3">
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={() => setRescheduleModalOpen(null)}
-                                    className="flex-1 py-2 px-4 rounded-lg bg-slate-700 text-white hover:bg-slate-600 transition-colors"
-                                >
-                                    Cancelar
-                                </button>
-                                <button
-                                    onClick={saveReschedule}
-                                    className="flex-1 py-2 px-4 rounded-lg bg-purple-600 text-white hover:bg-purple-500 transition-colors font-bold"
-                                >
-                                    Guardar
-                                </button>
-                            </div>
-                        </div>
-                    </div>
+                <div className="grid grid-cols-2 gap-2 mt-6">
+                    <button onClick={() => setRescheduleModalOpen(null)} className="h-12 rounded-xl bg-slate-800 border border-slate-700 text-slate-100 font-semibold active:bg-slate-700">Cancelar</button>
+                    <button onClick={saveReschedule} disabled={!rescheduleDate || !rescheduleTime} className="h-12 rounded-xl bg-purple-600 text-white font-semibold active:bg-purple-700 disabled:opacity-40">Guardar</button>
                 </div>
-            )}
+            </Sheet>
         </div>
     );
 }
+
+const CardAction = ({ label, ariaLabel, onClick, children }: {
+    label: string, ariaLabel: string, onClick: () => void, children: React.ReactNode
+}) => (
+    <button
+        onClick={onClick}
+        aria-label={ariaLabel}
+        className="h-11 px-1 flex items-center justify-center gap-1.5 text-[13px] font-medium text-slate-200 whitespace-nowrap active:bg-slate-800/80 active:text-white transition-colors first:rounded-bl-2xl"
+    >
+        {children}
+        {label}
+    </button>
+);

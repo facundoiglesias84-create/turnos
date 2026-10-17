@@ -1,14 +1,12 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { supabase } from '@/lib/supabase';
-import { useAuth } from '@/components/AuthContext';
+import * as store from '@/lib/data';
 import TurnList, { Turn } from '@/components/TurnList';
 import TurnForm from '@/components/TurnForm';
 import Link from 'next/link';
 
 export default function TurnosPage() {
-    const { user, loading: authLoading } = useAuth();
     const [turns, setTurns] = useState<Turn[]>([]);
     const [loading, setLoading] = useState(true);
 
@@ -18,25 +16,13 @@ export default function TurnosPage() {
     const [editingId, setEditingId] = useState<string | null>(null);
 
     useEffect(() => {
-        if (user) {
-            loadTurns();
-        }
-    }, [user]);
+        loadTurns();
+    }, []);
 
     const loadTurns = async () => {
-        const { data, error } = await supabase
-            .from('turns')
-            .select('*')
-            .eq('user_id', user?.id) // snake_case: user_id
-            .order('date_time', { ascending: true }); // snake_case: date_time
-
-        if (error) {
-            console.error('Error loading turns:', error);
-        } else {
-            // Map snake_case -> camelCase
-            const mappedTurns: Turn[] = (data || []).map((t: any) => ({
+        const mappedTurns: Turn[] = (await store.getAll('turns'))
+            .map((t: any) => ({
                 id: t.id,
-                userId: t.user_id,
                 clientName: t.client_name,
                 dateTime: t.date_time,
                 task: t.task,
@@ -47,47 +33,33 @@ export default function TurnosPage() {
                 reminderTime: t.reminder_time,
                 reminderSent: t.reminder_sent
             }));
-            setTurns(mappedTurns);
-        }
+        setTurns(mappedTurns);
         setLoading(false);
     };
 
-    const handleAddTurn = async (turnData: any) => {
-        if (!user) return;
+    const updateTurn = async (id: string, changes: Record<string, any>) => {
+        await store.update('turns', id, changes);
+        loadTurns();
+    };
 
-        // Map camelCase -> snake_case
-        const newTurn = {
-            user_id: user.id,
+    const handleAddTurn = async (turnData: any) => {
+        await store.insert('turns', {
             client_name: turnData.clientName,
             date_time: turnData.dateTime,
             task: turnData.task,
             estimated_price: turnData.estimatedPrice,
-            completed: false,
+            completed: null,
             paid: false
-        };
-
-        const { error } = await supabase
-            .from('turns')
-            .insert(newTurn);
-
-        if (error) {
-            alert('Error al crear turno');
-            console.error(error);
-        } else {
-            loadTurns();
-        }
+        });
+        loadTurns();
     };
 
     const handleDeleteTurn = async (id: string) => {
-        if (!confirm('¿Eliminar turno?')) return;
-        const { error } = await supabase.from('turns').delete().eq('id', id);
-        if (!error) loadTurns();
+        await store.remove('turns', id);
+        loadTurns();
     };
 
-    const handleStatusChange = async (id: string, status: boolean) => {
-        const { error } = await supabase.from('turns').update({ completed: status }).eq('id', id);
-        if (!error) loadTurns();
-    };
+    const handleStatusChange = (id: string, status: boolean) => updateTurn(id, { completed: status });
 
     // New Edit Logic
     const handleEditTurn = (turn: Turn) => {
@@ -103,31 +75,18 @@ export default function TurnosPage() {
         window.scrollTo({ top: 0, behavior: 'smooth' });
     };
 
-    const handleUpdateTurn = async (turnData: any) => {
+    const handleUpdateTurn = (turnData: any) => {
         if (!editingId) return;
 
-        // Map camelCase -> snake_case
-        const updates = {
+        updateTurn(editingId, {
             client_name: turnData.clientName,
             date_time: turnData.dateTime,
             task: turnData.task,
             estimated_price: turnData.estimatedPrice
-        };
-
-        const { error } = await supabase
-            .from('turns')
-            .update(updates)
-            .eq('id', editingId);
-
-        if (error) {
-            alert('Error al actualizar');
-            console.error(error);
-        } else {
-            setIsEditing(false);
-            setEditingId(null);
-            setEditingTurn(null);
-            loadTurns();
-        }
+        });
+        setIsEditing(false);
+        setEditingId(null);
+        setEditingTurn(null);
     };
 
     const handleCancelEdit = () => {
@@ -135,16 +94,6 @@ export default function TurnosPage() {
         setEditingId(null);
         setEditingTurn(null);
     };
-
-    if (authLoading) return <div className="p-4 text-white">Cargando...</div>;
-    if (!user) return (
-        <div className="p-4 text-white flex flex-col items-center justify-center h-screen space-y-4">
-            <p className="text-xl">Debes iniciar sesión para ver los turnos</p>
-            <Link href="/" className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg transition-colors">
-                Ir al Inicio para Loguearse
-            </Link>
-        </div>
-    );
 
     return (
         <div className="p-4 container mx-auto max-w-7xl space-y-6 pb-24">
@@ -180,22 +129,10 @@ export default function TurnosPage() {
                             onDelete={handleDeleteTurn}
                             onStatusChange={handleStatusChange}
                             onEditTurn={handleEditTurn}
-                            onPaidChange={async (id, paid) => {
-                                await supabase.from('turns').update({ paid }).eq('id', id);
-                                loadTurns();
-                            }}
-                            onUpdatePrice={async (id, price) => {
-                                await supabase.from('turns').update({ estimated_price: price }).eq('id', id);
-                                loadTurns();
-                            }}
-                            onUpdateDeposit={async (id, deposit) => {
-                                await supabase.from('turns').update({ deposit }).eq('id', id);
-                                loadTurns();
-                            }}
-                            onSetReminder={async (id, date) => {
-                                await supabase.from('turns').update({ reminder_time: date }).eq('id', id);
-                                loadTurns();
-                            }}
+                            onPaidChange={(id, paid) => updateTurn(id, { paid })}
+                            onUpdatePrice={(id, price) => updateTurn(id, { estimated_price: price })}
+                            onUpdateDeposit={(id, deposit) => updateTurn(id, { deposit })}
+                            onSetReminder={(id, date) => updateTurn(id, { reminder_time: date })}
                         />
                     )}
                 </div>

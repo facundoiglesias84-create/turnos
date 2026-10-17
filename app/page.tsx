@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import { useAuth } from '@/components/AuthContext';
-import { supabase } from '@/lib/supabase';
-import Login from '@/components/Login';
+import React, { useState, useEffect, useRef } from 'react';
+import * as store from '@/lib/data';
 import TurnList, { Turn } from '@/components/TurnList';
 import TurnForm from '@/components/TurnForm';
+import Sheet from '@/components/Sheet';
+import ConfirmDialog from '@/components/ConfirmDialog';
 
 // Interfaces
 interface Price {
@@ -24,12 +24,11 @@ interface Expense {
 type ViewState = 'next_turns' | 'new_turn' | 'prices' | 'stats';
 
 export default function MainPage() {
-    const { user, logout, loading: authLoading } = useAuth();
-
     // Global State
-    const [currentView, setCurrentView] = useState<ViewState>('new_turn');
+    const [currentView, setCurrentView] = useState<ViewState>('next_turns');
     const [menuOpen, setMenuOpen] = useState(false);
-    const [loading, setLoading] = useState(false);
+    const menuRef = useRef<HTMLDivElement>(null);
+    const [businessName, setBusinessName] = useState('');
 
     // Data State
     const [turns, setTurns] = useState<Turn[]>([]);
@@ -47,94 +46,101 @@ export default function MainPage() {
 
     // Initial Load
     useEffect(() => {
-        if (user) {
-            loadTurns();
-            loadPrices();
-            loadExpenses();
-        }
-    }, [user]);
+        store.getBusinessName().then(setBusinessName);
+        loadTurns();
+        loadPrices();
+        loadExpenses();
+    }, []);
+
+    // History: each view change is a history entry so the browser back button works
+    useEffect(() => {
+        window.history.replaceState({ view: 'next_turns' }, '');
+
+        const onPopState = (e: PopStateEvent) => {
+            setCurrentView(e.state?.view ?? 'next_turns');
+            setIsEditingTurn(false);
+            setEditingTurnData(null);
+            setEditingTurnId(null);
+        };
+        window.addEventListener('popstate', onPopState);
+        return () => window.removeEventListener('popstate', onPopState);
+    }, []);
+
+    // Close the view menu on outside click / Escape
+    useEffect(() => {
+        if (!menuOpen) return;
+        const onPointerDown = (e: PointerEvent) => {
+            if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+        };
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setMenuOpen(false);
+        };
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [menuOpen]);
+
+    const navigate = (view: ViewState, { replace = false } = {}) => {
+        if (view === currentView && !replace) return;
+        if (replace) window.history.replaceState({ view }, '');
+        else window.history.pushState({ view }, '');
+        setCurrentView(view);
+        window.scrollTo({ top: 0 });
+    };
 
     // Data Fetching
     const loadTurns = async () => {
-        if (!user) return;
-        const { data, error } = await supabase
-            .from('turns')
-            .select('*')
-            .eq('user_id', user.id)
-            .order('date_time', { ascending: true });
+        const rows = await store.getAll('turns');
+        setTurns(rows.map((t: any) => ({
+            id: t.id,
+            clientName: t.client_name,
+            dateTime: t.date_time,
+            task: t.task,
+            completed: t.completed,
+            estimatedPrice: t.estimated_price,
+            deposit: t.deposit,
+            paid: t.paid,
+            reminderTime: t.reminder_time,
+            reminderSent: t.reminder_sent
+        })));
+    };
 
-        if (!error && data) {
-            const mappedTurns: Turn[] = data.map((t: any) => ({
-                id: t.id,
-                userId: t.user_id,
-                clientName: t.client_name,
-                dateTime: t.date_time,
-                task: t.task,
-                completed: t.completed,
-                estimatedPrice: t.estimated_price,
-                deposit: t.deposit,
-                paid: t.paid,
-                reminderTime: t.reminder_time,
-                reminderSent: t.reminder_sent
-            }));
-            setTurns(mappedTurns);
-        } else if (error) {
-            console.error('Error loading turns:', error);
+    const loadPrices = async () => setPrices(await store.getAll<Price>('prices'));
+    const loadExpenses = async () => setExpenses(await store.getAll<Expense>('expenses'));
+
+    // Runs a write against the DB; on failure tells the user instead of failing silently
+    const save = async (action: () => Promise<unknown>) => {
+        try {
+            await action();
+            return true;
+        } catch (error) {
+            console.error(error);
+            alert('No se pudo guardar. Revisá la conexión e intentá de nuevo.');
+            return false;
         }
-    };
-
-    const loadPrices = async () => {
-        if (!user) return;
-        const { data, error } = await supabase
-            .from('prices')
-            .select('*')
-            .eq('user_id', user.id)
-            .order('service_name');
-
-        if (!error && data) setPrices(data);
-    };
-
-    const loadExpenses = async () => {
-        if (!user) return;
-        const { data, error } = await supabase
-            .from('expenses')
-            .select('*')
-            .eq('user_id', user.id)
-            .order('created_at', { ascending: false });
-
-        if (!error && data) setExpenses(data);
     };
 
     // --- Handlers ---
 
     // Business Name Handler
     const handleUpdateBusinessName = async () => {
-        if (!user || !tempBusinessName.trim()) return;
-
-        const { error } = await supabase.auth.updateUser({
-            data: { business_name: tempBusinessName.trim() }
-        });
-
-        if (error) {
-            console.error('Error updating business name:', error);
-            alert('Error al actualizar el nombre.');
-        } else {
-            await supabase.from('profiles').upsert({
-                id: user.id,
-                email: undefined,
-                business_name: tempBusinessName.trim()
-            });
-            window.location.reload();
-        }
+        const name = tempBusinessName.trim();
+        if (!name) return;
+        if (!await save(() => store.setBusinessName(name))) return;
+        setBusinessName(name);
+        setBusinessNameModalOpen(false);
     };
 
     const openBusinessNameModal = () => {
-        setTempBusinessName(user?.businessName || '');
+        setTempBusinessName(businessName);
         setBusinessNameModalOpen(true);
     };
 
     const handleNavigation = (view: ViewState) => {
-        setCurrentView(view);
+        navigate(view);
         setMenuOpen(false);
         if (view !== 'new_turn') {
             setIsEditingTurn(false);
@@ -144,226 +150,157 @@ export default function MainPage() {
     };
 
     const handleAddTurn = async (turnData: any) => {
-        if (!user) return;
-        setLoading(true);
-
-        const dbPayload = {
-            user_id: user.id,
+        const ok = await save(() => store.insert('turns', {
             client_name: turnData.clientName,
             date_time: turnData.dateTime,
             task: turnData.task,
             estimated_price: turnData.estimatedPrice,
-            completed: false,
+            completed: null,
             paid: false
-        };
-
-        const { error } = await supabase.from('turns').insert(dbPayload);
-
-        if (error) {
-            alert('Error al crear turno: ' + error.message);
-        } else {
-            await loadTurns();
-            setCurrentView('next_turns');
-        }
-        setLoading(false);
+        }));
+        if (!ok) return;
+        await loadTurns();
+        navigate('next_turns', { replace: true });
     };
 
     const handleUpdateTurn = async (turnData: any) => {
         if (!editingTurnId) return;
-        setLoading(true);
 
-        const dbPayload = {
+        const ok = await save(() => store.update('turns', editingTurnId, {
             client_name: turnData.clientName,
             date_time: turnData.dateTime,
             task: turnData.task,
             estimated_price: turnData.estimatedPrice
-        };
-
-        const { error } = await supabase.from('turns')
-            .update(dbPayload)
-            .eq('id', editingTurnId);
-
-        if (error) {
-            alert('Error al actualizar: ' + error.message);
-        } else {
-            await loadTurns();
-            setIsEditingTurn(false);
-            setEditingTurnId(null);
-            setEditingTurnData(null);
-            setCurrentView('next_turns');
-        }
-        setLoading(false);
+        }));
+        if (!ok) return;
+        await loadTurns();
+        setIsEditingTurn(false);
+        setEditingTurnId(null);
+        setEditingTurnData(null);
+        navigate('next_turns', { replace: true });
     };
 
-    const handleDeleteTurn = async (id: string) => {
-        if (!confirm('¿Eliminar turno?')) return;
-        const { error } = await supabase.from('turns').delete().eq('id', id);
-        if (!error) loadTurns();
+    const updateTurn = async (id: string, changes: Record<string, any>) => {
+        await save(() => store.update('turns', id, changes));
+        await loadTurns();
     };
 
-    const handleStatusChange = async (id: string, status: boolean) => {
-        await supabase.from('turns').update({ completed: status }).eq('id', id);
-        loadTurns();
+    const deleteTurn = async (id: string) => {
+        await save(() => store.remove('turns', id));
+        await loadTurns();
     };
 
-    const handlePaidChange = async (id: string, paid: boolean) => {
-        await supabase.from('turns').update({ paid }).eq('id', id);
-        loadTurns();
-    };
+    const handleStatusChange = (id: string, status: boolean) => updateTurn(id, { completed: status });
+    const handlePaidChange = (id: string, paid: boolean) => updateTurn(id, { paid });
+    const handleUpdatePrice = (id: string, price: number) => updateTurn(id, { estimated_price: price });
+    const handleUpdateDeposit = (id: string, deposit: number) => updateTurn(id, { deposit });
+    const handleSetReminder = (id: string, date: string | null) => updateTurn(id, { reminder_time: date });
+    const handleReschedule = (id: string, date: string) => updateTurn(id, { date_time: date });
+    const handleUpdateTurnData = (id: string, updates: { task: string, price: number }) =>
+        updateTurn(id, { task: updates.task, estimated_price: updates.price });
 
-    const handleUpdatePrice = async (id: string, price: number) => {
-        await supabase.from('turns').update({ estimated_price: price }).eq('id', id);
-        loadTurns();
-    };
-
-    const handleUpdateDeposit = async (id: string, deposit: number) => {
-        await supabase.from('turns').update({ deposit }).eq('id', id);
-        loadTurns();
-    };
-
-    const handleSetReminder = async (id: string, date: string | null) => {
-        await supabase.from('turns').update({ reminder_time: date }).eq('id', id);
-        loadTurns();
-    };
-
-    const handleReschedule = async (id: string, date: string) => {
-        await supabase.from('turns').update({ date_time: date }).eq('id', id);
-        loadTurns();
-    };
-
-    const handleUpdateTask = async (id: string, task: string) => {
-        await supabase.from('turns').update({ task }).eq('id', id);
-        loadTurns();
-    };
-
-    const handleUpdateTurnData = async (id: string, updates: { task: string, price: number }) => {
-        await supabase.from('turns').update({
-            task: updates.task,
-            estimated_price: updates.price
-        }).eq('id', id);
-        loadTurns();
-    };
+    // Edit sheet (opened from a turn card)
+    const [sheetTurn, setSheetTurn] = useState<Turn | null>(null);
+    const [sheetData, setSheetData] = useState<any>(null);
 
     const handleEditTurnClick = (turn: Turn) => {
-        setIsEditingTurn(true);
-        setEditingTurnId(turn.id);
-        setEditingTurnData({
+        setSheetTurn(turn);
+        setSheetData({
             clientName: turn.clientName,
             dateTime: turn.dateTime,
-            task: turn.task,
-            estimatedPrice: turn.estimatedPrice
+            task: turn.task || '',
+            estimatedPrice: turn.estimatedPrice || 0
         });
-        setCurrentView('new_turn');
+    };
+
+    const closeSheet = () => setSheetTurn(null);
+
+    const handleSheetSave = async (turnData: any) => {
+        if (!sheetTurn) return;
+        const ok = await save(() => store.update('turns', sheetTurn.id, {
+            client_name: turnData.clientName,
+            date_time: turnData.dateTime,
+            task: turnData.task,
+            estimated_price: turnData.estimatedPrice
+        }));
+        if (!ok) return;
+        await loadTurns();
+        closeSheet();
     };
 
     const handleAddExpense = async (description: string, amount: number) => {
-        if (!user) return;
-        const { error } = await supabase.from('expenses').insert({
-            user_id: user.id,
-            description,
-            amount
-        });
-
-        if (error) {
-            alert('Error al crear gasto');
-        } else {
-            loadExpenses();
-        }
+        await save(() => store.insert('expenses', { description, amount }));
+        await loadExpenses();
     };
 
     const handleDeleteExpense = async (id: string) => {
-        if (!confirm('¿Eliminar gasto?')) return;
-        const { error } = await supabase.from('expenses').delete().eq('id', id);
-        if (!error) loadExpenses();
+        await save(() => store.remove('expenses', id));
+        await loadExpenses();
     };
 
     const handleUpdateExpense = async (id: string, description: string, amount: number) => {
-        const { error } = await supabase.from('expenses').update({ description, amount }).eq('id', id);
-        if (!error) loadExpenses();
+        await save(() => store.update('expenses', id, { description, amount }));
+        await loadExpenses();
     };
 
     // --- Render ---
 
-    if (authLoading) return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-purple-500 font-bold">Cargando...</div>;
-    if (!user) return <Login />;
-
-    const getTitle = () => {
-        switch (currentView) {
-            case 'next_turns': return 'Próximos Turnos';
-            case 'new_turn': return isEditingTurn ? 'Editar Turno' : 'Agendar Turno';
-            case 'prices': return 'Lista de Precios';
-            case 'stats': return 'Ganancias y Gastos';
-            default: return 'Agendar Turno';
-        }
-    };
-
     return (
-        <div className="min-h-screen bg-[#0f1020] p-4 text-white font-sans max-w-md mx-auto relative selection:bg-purple-500/30">
+        <div className="min-h-screen bg-[#0f1020] px-4 pt-4 pb-12 text-white font-sans max-w-md mx-auto relative selection:bg-purple-500/30">
             {/* Header */}
-            <header className="relative flex flex-col items-center justify-center py-6 mb-2">
-
-                {/* Logout / Admin Top Right */}
-                {/* Logout / Admin Top Right */}
-                <div className="absolute top-1/2 -translate-y-1/2 right-2 flex items-center gap-3">
-                    {user?.username?.toLowerCase() === 'facundo' && (
-                        <span className="bg-purple-900/50 text-purple-300 px-2 py-0.5 rounded text-[10px] font-bold border border-purple-500/30 tracking-wider">ADMIN</span>
-                    )}
-                    <button onClick={logout} className="text-red-500 hover:text-red-400 transition-colors p-2 hover:bg-red-900/10 rounded-full" title="Cerrar Sesión">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-8 h-8">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
-                        </svg>
-                    </button>
-                </div>
-
-                {/* Centered Title */}
-                <div className="text-center">
-                    <h1
+            <header className="flex flex-col items-center justify-center pt-4 pb-6">
+                <h1>
+                    <button
                         onClick={openBusinessNameModal}
-                        className="text-4xl font-extrabold tracking-tight mb-1 cursor-pointer hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2 group"
+                        aria-label="Editar nombre del negocio"
+                        className="text-3xl font-extrabold tracking-tight mb-1 cursor-pointer active:scale-95 transition-transform flex items-center justify-center gap-2 group"
                     >
                         <span className="bg-gradient-to-r from-white via-purple-100 to-purple-200 text-transparent bg-clip-text drop-shadow-[0_0_15px_rgba(168,85,247,0.3)]">
-                            {user.businessName || 'Mi Negocio'}
+                            {businessName || 'Mi Negocio'}
                         </span>
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5 text-purple-400/50 group-hover:text-purple-400 opacity-0 group-hover:opacity-100 transition-all">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-4 h-4 text-purple-400/60 group-hover:text-purple-400 transition-colors" aria-hidden="true">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125" />
                         </svg>
-                    </h1>
-                    <div className="h-1 w-24 bg-gradient-to-r from-transparent via-purple-500/50 to-transparent mx-auto rounded-full"></div>
-                </div>
+                    </button>
+                </h1>
+                <div className="h-1 w-24 bg-gradient-to-r from-transparent via-purple-500/50 to-transparent mx-auto rounded-full"></div>
             </header>
 
-            {/* Navigation Dropdown Trigger */}
-            <div className="relative mb-8 z-50">
+            {/* View Dropdown */}
+            <div ref={menuRef} className="relative w-full mb-8 z-50">
                 <button
-                    onClick={() => setMenuOpen(!menuOpen)}
-                    className="w-full bg-[#181828] border border-slate-700/50 rounded-2xl p-4 flex items-center shadow-lg active:scale-[0.99] transition-all group"
+                    onClick={() => setMenuOpen(o => !o)}
+                    aria-haspopup="menu"
+                    aria-expanded={menuOpen}
+                    className="w-full flex items-center justify-between gap-3 px-5 py-4 rounded-xl bg-[#181828] border border-slate-700/50 text-white text-base font-semibold shadow-[0_10px_25px_rgba(0,0,0,0.35)] cursor-pointer transition-[transform,background-color] duration-200 hover:bg-[#1f1f33] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
                 >
-                    <div className={`p-1 rounded-full text-slate-400 invisible transition-transform duration-300`}>
-                        {/* Spacer to balance the centered text */}
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-                        </svg>
-                    </div>
-
-                    <span className="flex-1 text-center text-xl font-bold text-white tracking-wide">{getTitle()}</span>
-
-                    <div className={`p-1 rounded-full text-slate-400 transition-transform duration-300 ${menuOpen ? 'rotate-180' : ''}`}>
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-                        </svg>
-                    </div>
+                    <span className="flex items-center gap-3">
+                        <NavIcon d={VIEWS[currentView].icon} className="w-6 h-6 text-purple-400" />
+                        {currentView === 'new_turn' && isEditingTurn ? 'Editar Turno' : VIEWS[currentView].label}
+                    </span>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${menuOpen ? 'rotate-180' : ''}`} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                    </svg>
                 </button>
 
-                {menuOpen && (
-                    <div className="absolute top-full left-0 right-0 mt-2 bg-[#181828] border border-slate-700/50 rounded-2xl overflow-hidden shadow-2xl animate-fade-in-down origin-top">
-                        <div className="flex flex-col">
-                            <MenuOption label="Agendar Turno" onClick={() => handleNavigation('new_turn')} active={currentView === 'new_turn'} />
-                            <MenuOption label="Próximos Turnos" onClick={() => handleNavigation('next_turns')} active={currentView === 'next_turns'} />
-                            <MenuOption label="Lista de Precios" onClick={() => handleNavigation('prices')} active={currentView === 'prices'} />
-                            <MenuOption label="Ganancias y Gastos" onClick={() => handleNavigation('stats')} active={currentView === 'stats'} />
-                        </div>
-                    </div>
-                )}
+                <div
+                    role="menu"
+                    className={`absolute top-full left-0 right-0 mt-2 p-1.5 rounded-xl bg-[#181828] border border-slate-700/50 shadow-[0_10px_25px_rgba(0,0,0,0.45)] origin-top transition-[opacity,transform] duration-200 ease-out ${menuOpen ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 -translate-y-1 scale-95 pointer-events-none'}`}
+                >
+                    {(Object.keys(VIEWS) as ViewState[]).map(view => (
+                        <button
+                            key={view}
+                            role="menuitem"
+                            tabIndex={menuOpen ? 0 : -1}
+                            onClick={() => handleNavigation(view)}
+                            aria-current={currentView === view ? 'page' : undefined}
+                            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left text-base transition-colors ${currentView === view ? 'bg-purple-900/30 text-purple-300 font-semibold' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+                        >
+                            <NavIcon d={VIEWS[view].icon} className="w-5 h-5" />
+                            {VIEWS[view].label}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             {/* Content */}
@@ -376,7 +313,7 @@ export default function MainPage() {
                     <TurnList
                         turns={turns.filter(t => !t.paid)}
                         prices={prices} // Pass prices list
-                        onDelete={handleDeleteTurn}
+                        onDelete={deleteTurn}
                         onStatusChange={handleStatusChange}
                         onEditTurn={handleEditTurnClick}
                         onReschedule={handleReschedule}
@@ -401,7 +338,7 @@ export default function MainPage() {
                 )}
 
                 {currentView === 'prices' && (
-                    <PricesView prices={prices} onReload={loadPrices} user={user} />
+                    <PricesView prices={prices} onReload={loadPrices} />
                 )}
 
                 {currentView === 'stats' && (
@@ -412,10 +349,27 @@ export default function MainPage() {
                         onDeleteExpense={handleDeleteExpense}
                         onUpdateExpense={handleUpdateExpense}
                         onPaidChange={handlePaidChange}
-                        onDeleteTurn={handleDeleteTurn}
+                        onDeleteTurn={deleteTurn}
                     />
                 )}
             </div>
+
+            {/* Edit Turn Sheet */}
+            <Sheet open={!!sheetTurn} title="Editar turno" onClose={closeSheet}>
+                {sheetTurn && (
+                    <>
+                        <TurnForm
+                            key={sheetTurn.id}
+                            embedded
+                            isEditing
+                            initialData={sheetData}
+                            onAddTurn={() => {}}
+                            onUpdateTurn={handleSheetSave}
+                            onCancel={closeSheet}
+                        />
+                    </>
+                )}
+            </Sheet>
 
             {/* Business Name Edit Modal */}
             {businessNameModalOpen && (
@@ -443,173 +397,174 @@ export default function MainPage() {
 
 // Helper Components
 
-const MenuOption = ({ label, onClick, active }: { label: string, onClick: () => void, active: boolean }) => (
-    <button
-        onClick={onClick}
-        className={`w-full text-center px-5 py-4 text-lg border-b border-slate-800 last:border-0 transition-colors ${active ? 'bg-purple-900/20 text-purple-400 font-bold' : 'text-slate-300 hover:bg-slate-800'}`}
-    >
-        {label}
-    </button>
+const VIEWS: Record<ViewState, { label: string, icon: string }> = {
+    next_turns: { label: 'Próximos Turnos', icon: 'M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5' },
+    new_turn: { label: 'Agendar Turno', icon: 'M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z' },
+    prices: { label: 'Lista de Precios', icon: 'M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z M6 6h.008v.008H6V6z' },
+    stats: { label: 'Ganancias y Gastos', icon: 'M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z' },
+};
+
+const NavIcon = ({ d, className }: { d: string, className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className={className} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d={d} />
+    </svg>
 );
 
-const PricesView = ({ prices, onReload, user }: { prices: Price[], onReload: () => void, user: any }) => {
-    const [showModal, setShowModal] = useState(false);
-    const [serviceName, setServiceName] = useState('');
-    const [postPrice, setPostPrice] = useState('');
+const PricesView = ({ prices, onReload }: { prices: Price[], onReload: () => void }) => {
+    // Add / edit sheet: editing === null → closed, 'new' → adding, Price → editing that service
+    const [editing, setEditing] = useState<Price | 'new' | null>(null);
+    const [name, setName] = useState('');
+    const [amount, setAmount] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [priceToDelete, setPriceToDelete] = useState<Price | null>(null);
 
-    // Edit State
-    const [editingId, setEditingId] = useState<string | null>(null);
-    const [editName, setEditName] = useState('');
-    const [editPriceVal, setEditPriceVal] = useState('');
+    const openNew = () => {
+        setName('');
+        setAmount('');
+        setEditing('new');
+    };
 
-    const handleSubmit = async (e: React.FormEvent) => {
+    const openEdit = (price: Price) => {
+        setName(price.service_name);
+        setAmount(price.price.toString());
+        setEditing(price);
+    };
+
+    const closeSheet = () => setEditing(null);
+
+    const parsedAmount = parseFloat(amount.replace(',', '.'));
+    const canSave = name.trim() !== '' && !isNaN(parsedAmount);
+
+    const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
-        const { error } = await supabase.from('prices').insert({
-            user_id: user.id,
-            service_name: serviceName,
-            price: parseFloat(postPrice)
-        });
-
-        if (!error) {
+        if (!canSave || !editing) return;
+        setSaving(true);
+        try {
+            const data = { service_name: name.trim(), price: parsedAmount };
+            if (editing === 'new') await store.insert('prices', data);
+            else await store.update('prices', editing.id, data);
             onReload();
-            setShowModal(false);
-            setServiceName('');
-            setPostPrice('');
-        } else {
+            closeSheet();
+        } catch (error) {
             console.error(error);
-            alert('Error al guardar servicio: ' + error.message);
+            alert('No se pudo guardar el servicio.');
+        } finally {
+            setSaving(false);
         }
     };
 
     const handleDelete = async (id: string) => {
-        if (!confirm('Eliminar?')) return;
-        await supabase.from('prices').delete().eq('id', id);
+        await store.remove('prices', id);
         onReload();
-    };
-
-    const startEditing = (price: Price) => {
-        setEditingId(price.id);
-        setEditName(price.service_name);
-        setEditPriceVal(price.price.toString());
-    };
-
-    const cancelEditing = () => {
-        setEditingId(null);
-        setEditName('');
-        setEditPriceVal('');
-    };
-
-    const handleUpdate = async (id: string) => {
-        if (!editName || !editPriceVal) return;
-
-        const { error } = await supabase.from('prices')
-            .update({
-                service_name: editName,
-                price: parseFloat(editPriceVal)
-            })
-            .eq('id', id);
-
-        if (!error) {
-            onReload();
-            cancelEditing();
-        } else {
-            alert('Error al actualizar: ' + error.message);
-        }
     };
 
     return (
         <div className="animate-fade-in">
             <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl font-bold">Lista de Precios</h2>
-                <button onClick={() => setShowModal(true)} className="bg-purple-600 hover:bg-purple-500 px-4 py-2 rounded-xl font-bold shadow-lg shadow-purple-900/20 transition-all active:scale-95">
-                    + Agregar
+                <button
+                    onClick={openNew}
+                    className="flex items-center gap-1.5 h-11 px-4 rounded-xl bg-purple-500/20 backdrop-blur-md border border-purple-300/30 text-purple-50 font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_8px_20px_rgba(88,28,135,0.35)] active:scale-[0.97] active:bg-purple-500/30 transition"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="w-4 h-4" aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                    </svg>
+                    Agregar
                 </button>
             </div>
 
             <div className="space-y-2">
                 {prices.map(p => (
-                    <div key={p.id} className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4 flex justify-between items-center hover:bg-slate-800 transition-colors">
-                        {editingId === p.id ? (
-                            <div className="flex items-center gap-2 w-full">
-                                <div className="flex-1 space-y-2">
-                                    <input
-                                        value={editName}
-                                        onChange={e => setEditName(e.target.value)}
-                                        className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-white text-sm"
-                                        placeholder="Nombre"
-                                        autoFocus
-                                    />
-                                    <input
-                                        type="number"
-                                        value={editPriceVal}
-                                        onChange={e => setEditPriceVal(e.target.value)}
-                                        className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-white text-sm"
-                                        placeholder="Precio"
-                                    />
-                                </div>
-                                <div className="flex flex-col gap-2">
-                                    <button onClick={() => handleUpdate(p.id)} className="text-green-400 p-1 hover:bg-slate-700 rounded transition-colors">
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
-                                    </button>
-                                    <button onClick={cancelEditing} className="text-red-400 p-1 hover:bg-slate-700 rounded transition-colors">
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                                    </button>
-                                </div>
+                    <div key={p.id} className="rounded-xl bg-[#1e1e32] border border-slate-600/40 shadow-[0_8px_20px_rgba(0,0,0,0.3)] pl-4 pr-2 py-2.5 flex justify-between items-center gap-3">
+                        <span className="font-medium text-lg text-slate-100 truncate">{p.service_name}</span>
+                        <div className="flex items-center gap-3 shrink-0">
+                            <span className="text-emerald-400 font-bold text-lg tabular-nums">${p.price.toLocaleString('es-AR')}</span>
+                            <div className="flex items-center rounded-xl bg-white/[0.06] backdrop-blur-md border border-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_4px_12px_rgba(0,0,0,0.25)] divide-x divide-white/10 overflow-hidden">
+                                <button onClick={() => openEdit(p)} aria-label={`Editar ${p.service_name}`} className="w-12 h-12 flex items-center justify-center text-slate-200 active:bg-white/10 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor" className="w-6 h-6" aria-hidden="true">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                                    </svg>
+                                </button>
+                                <button onClick={() => setPriceToDelete(p)} aria-label={`Eliminar ${p.service_name}`} className="w-12 h-12 flex items-center justify-center text-rose-400 active:bg-rose-500/15 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor" className="w-6 h-6" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+                                </button>
                             </div>
-                        ) : (
-                            <>
-                                <span className="font-medium text-lg text-slate-200">{p.service_name}</span>
-                                <div className="flex items-center gap-4">
-                                    <span className="text-green-400 font-bold text-lg">${p.price.toLocaleString('es-AR')}</span>
-                                    <div className="flex gap-1">
-                                        <button onClick={() => startEditing(p)} className="text-slate-500 hover:text-blue-400 p-1 transition-colors">
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                                                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-                                            </svg>
-                                        </button>
-                                        <button onClick={() => handleDelete(p.id)} className="text-slate-500 hover:text-red-400 p-1 transition-colors">
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-                                        </button>
-                                    </div>
-                                </div>
-                            </>
-                        )}
+                        </div>
                     </div>
                 ))}
-                {prices.length === 0 && <div className="p-8 text-center text-slate-400 bg-slate-800/30 rounded-xl border border-dashed border-slate-700">No hay servicios guardados.</div>}
+                {prices.length === 0 && <div className="p-8 text-center text-slate-400 rounded-xl border border-dashed border-slate-700">No hay servicios guardados.</div>}
             </div>
 
-            {showModal && (
-                <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-4 backdrop-blur-sm">
-                    <form onSubmit={handleSubmit} className="bg-slate-900 p-6 rounded-2xl w-full max-w-sm border border-slate-700 shadow-2xl">
-                        <h3 className="text-xl font-bold mb-4 text-white">Nuevo Servicio</h3>
-                        <div className="space-y-4 mb-6">
-                            <div>
-                                <label className="block text-sm font-bold text-slate-400 mb-1">Nombre</label>
-                                <input className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 outline-none" placeholder="Ej. Corte de Pelo" value={serviceName} onChange={e => setServiceName(e.target.value)} required autoFocus />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-bold text-slate-400 mb-1">Precio</label>
-                                <input className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 outline-none" type="number" placeholder="$0" value={postPrice} onChange={e => setPostPrice(e.target.value)} required />
+            {/* Add / edit sheet */}
+            <Sheet open={editing !== null} title={editing === 'new' ? 'Nuevo servicio' : 'Editar servicio'} onClose={closeSheet}>
+                <form onSubmit={handleSave}>
+                    <div className="space-y-4">
+                        <div>
+                            <label htmlFor="service-name" className="block text-base font-semibold text-slate-200 mb-2">Nombre</label>
+                            <input
+                                id="service-name"
+                                className="input-field !mb-0 text-lg"
+                                placeholder="Ej. Semipermanente"
+                                value={name}
+                                onChange={e => setName(e.target.value)}
+                                autoComplete="off"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="service-price" className="block text-base font-semibold text-slate-200 mb-2">Precio</label>
+                            <div className="relative">
+                                <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-lg font-bold text-slate-400" aria-hidden="true">$</span>
+                                <input
+                                    id="service-price"
+                                    type="text"
+                                    inputMode="decimal"
+                                    autoComplete="off"
+                                    className="input-field !mb-0 !pl-9 text-lg font-bold text-emerald-400 tabular-nums"
+                                    placeholder="0"
+                                    value={amount}
+                                    onChange={e => setAmount(e.target.value.replace(/[^\d.,]/g, ''))}
+                                />
                             </div>
                         </div>
-                        <div className="flex gap-2">
-                            <button type="button" onClick={() => setShowModal(false)} className="flex-1 py-3 bg-slate-700 hover:bg-slate-600 rounded-xl text-white transition-colors">Cancelar</button>
-                            <button type="submit" className="flex-1 py-3 bg-purple-600 hover:bg-purple-500 rounded-xl font-bold text-white transition-colors">Guardar</button>
-                        </div>
-                    </form>
-                </div>
-            )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 mt-6">
+                        <button type="button" onClick={closeSheet} className="h-12 rounded-xl bg-slate-800 border border-slate-700 text-slate-100 font-semibold active:bg-slate-700 transition-colors">
+                            Cancelar
+                        </button>
+                        <button type="submit" disabled={!canSave || saving} className="h-12 rounded-xl bg-purple-600 text-white font-semibold active:bg-purple-700 disabled:opacity-40 transition-colors">
+                            {saving ? 'Guardando…' : 'Guardar'}
+                        </button>
+                    </div>
+                </form>
+            </Sheet>
+
+            <ConfirmDialog
+                open={!!priceToDelete}
+                title="¿Eliminar servicio?"
+                message={priceToDelete ? `Se borrará "${priceToDelete.service_name}" de la lista de precios.` : undefined}
+                confirmLabel="Eliminar"
+                onCancel={() => setPriceToDelete(null)}
+                onConfirm={() => {
+                    if (priceToDelete) handleDelete(priceToDelete.id);
+                    setPriceToDelete(null);
+                }}
+            />
         </div>
     );
 };
+
+const formatMoney = (n: number) => `$${n.toLocaleString('es-AR')}`;
+
+const DOTS_ICON = 'M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z';
+
+const currentMonth = () => new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 
 const StatsView = ({
     turns,
     expenses,
     onAddExpense,
     onDeleteExpense,
-    onUpdateExpense, // New Prop
+    onUpdateExpense,
     onPaidChange,
     onDeleteTurn
 }: {
@@ -624,18 +579,37 @@ const StatsView = ({
     const [desc, setDesc] = useState('');
     const [amount, setAmount] = useState('');
     const [showExpenseModal, setShowExpenseModal] = useState(false);
-    const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null); // For Edit Mode
-    const [openMenuId, setOpenMenuId] = useState<string | null>(null); // For Dropdown
-    const [openPaidMenuId, setOpenPaidMenuId] = useState<string | null>(null);
+    const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
+    const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+    const [pendingDelete, setPendingDelete] = useState<{ kind: 'expense' | 'turn', id: string, label: string } | null>(null);
 
-    const totalEarnings = turns
-        .filter(t => t.paid)
-        .reduce((sum, t) => sum + (t.estimatedPrice || 0), 0);
+    // Period filter: a given month, or null for all time
+    const [month, setMonth] = useState<Date | null>(currentMonth);
 
-    const totalExpenses = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
+    const inPeriod = (dateStr?: string) => {
+        if (!month) return true;
+        if (!dateStr) return false;
+        const d = new Date(dateStr);
+        return d.getFullYear() === month.getFullYear() && d.getMonth() === month.getMonth();
+    };
+
+    const shiftMonth = (delta: number) => {
+        const base = month ?? currentMonth();
+        setMonth(new Date(base.getFullYear(), base.getMonth() + delta, 1));
+    };
+
+    const periodLabel = month
+        ? `${month.toLocaleDateString('es-AR', { month: 'long' }).replace(/^./, c => c.toUpperCase())} ${month.getFullYear()}`
+        : 'Todo el historial';
+
+    const paidTurns = turns
+        .filter(t => t.paid && inPeriod(t.dateTime))
+        .sort((a, b) => b.dateTime.localeCompare(a.dateTime));
+    const periodExpenses = expenses.filter(e => inPeriod(e.created_at));
+
+    const totalEarnings = paidTurns.reduce((sum, t) => sum + (t.estimatedPrice || 0), 0);
+    const totalExpenses = periodExpenses.reduce((sum, e) => sum + Number(e.amount), 0);
     const balance = totalEarnings - totalExpenses;
-
-    const paidTurns = turns.filter(t => t.paid);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -664,150 +638,151 @@ const StatsView = ({
         setShowExpenseModal(true);
     };
 
-    const handleDeleteClick = (id: string) => {
-        onDeleteExpense(id);
-        setOpenMenuId(null);
-    };
+    const toggleMenu = (id: string) => setOpenMenuId(openMenuId === id ? null : id);
 
     return (
-        <div className="space-y-6 animate-fade-in pb-20" onClick={() => setOpenMenuId(null)}>
-            {/* Cards Grid */}
-            <div className="grid grid-cols-1 gap-4">
-                <div className="bg-green-600/90 p-5 rounded-3xl shadow-lg shadow-green-900/20">
-                    <h3 className="text-green-100 font-medium mb-1 text-sm uppercase tracking-wider">Ganancias Totales</h3>
-                    <p className="text-3xl font-bold text-white">${totalEarnings.toLocaleString('es-AR')}</p>
-                </div>
-
-                <div className="bg-red-600/90 p-5 rounded-3xl shadow-lg shadow-red-900/20">
-                    <h3 className="text-red-100 font-medium mb-1 text-sm uppercase tracking-wider">Gastos Totales</h3>
-                    <p className="text-3xl font-bold text-white">${totalExpenses.toLocaleString('es-AR')}</p>
-                </div>
-
-                <div className={`p-5 rounded-3xl shadow-lg ${balance >= 0 ? 'bg-blue-600/90 shadow-blue-900/20' : 'bg-orange-600/90 shadow-orange-900/20'}`}>
-                    <h3 className={`font-medium mb-1 text-sm uppercase tracking-wider ${balance >= 0 ? 'text-blue-100' : 'text-orange-100'}`}>Caja</h3>
-                    <p className="text-3xl font-bold text-white">${balance.toLocaleString('es-AR')}</p>
-                </div>
-            </div>
-
-            {/* Expenses List Section */}
-            <div>
-                <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-xl font-bold text-white">Últimos Gastos</h3>
+        <div className="space-y-8 animate-fade-in" onClick={() => setOpenMenuId(null)}>
+            {/* Period selector */}
+            <div className="flex items-center justify-between gap-2 bg-[#181828] border border-slate-700/50 rounded-xl p-1.5">
+                <button onClick={() => shiftMonth(-1)} aria-label="Mes anterior" className="p-2.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
+                    <NavIcon d="M15.75 19.5L8.25 12l7.5-7.5" className="w-5 h-5" />
+                </button>
+                <div className="flex flex-col items-center">
+                    <span className="text-base font-semibold text-white">{periodLabel}</span>
                     <button
-                        onClick={(e) => { e.stopPropagation(); setShowExpenseModal(true); }}
-                        className="bg-red-600 hover:bg-red-500 text-white font-bold px-4 py-2 rounded-xl shadow-lg shadow-red-900/20 flex items-center gap-2 transition-all active:scale-95 text-sm"
+                        onClick={() => setMonth(month ? null : currentMonth())}
+                        className="text-xs text-purple-400 hover:text-purple-300 font-medium py-0.5"
                     >
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                        </svg>
-                        Agregar Gasto
+                        {month ? 'Ver todo' : 'Ver mes actual'}
                     </button>
                 </div>
-                <div className="space-y-3">
-                    {expenses.map(e => (
-                        <div key={e.id} className="relative bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 flex justify-between items-center group hover:bg-slate-800 transition-colors">
-                            <div>
-                                <p className="font-bold text-white">{e.description}</p>
-                                <p className="text-xs text-slate-500">{new Date(e.created_at || Date.now()).toLocaleDateString('es-AR')}</p>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                <span className="text-red-400 font-bold text-lg">-${e.amount.toLocaleString('es-AR')}</span>
-                                {/* Three Dots Menu Trigger */}
-                                <button
-                                    onClick={(event) => {
-                                        event.stopPropagation();
-                                        setOpenMenuId(openMenuId === e.id ? null : e.id);
-                                    }}
-                                    className="p-1 text-slate-400 hover:text-white rounded-full hover:bg-slate-700 transition-colors"
-                                >
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z" />
-                                    </svg>
-                                </button>
+                <button onClick={() => shiftMonth(1)} aria-label="Mes siguiente" className="p-2.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
+                    <NavIcon d="M8.25 4.5l7.5 7.5-7.5 7.5" className="w-5 h-5" />
+                </button>
+            </div>
 
-                                {/* Dropdown Menu */}
+            {/* Summary */}
+            <section aria-label="Resumen" className="rounded-2xl bg-gradient-to-br from-[#241a3d] to-[#181828] border border-purple-500/20 p-5 shadow-[0_10px_25px_rgba(0,0,0,0.35)]">
+                <p className="text-sm font-medium text-slate-400">Caja</p>
+                <p className={`text-4xl font-extrabold tracking-tight mt-1 ${balance >= 0 ? 'text-white' : 'text-orange-400'}`}>
+                    {balance < 0 && '-'}{formatMoney(Math.abs(balance))}
+                </p>
+                <div className="grid grid-cols-2 gap-3 mt-5">
+                    <div className="rounded-xl bg-black/20 p-3">
+                        <p className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400" aria-hidden="true"></span>Ingresos
+                        </p>
+                        <p className="text-lg font-bold text-emerald-400 mt-0.5">{formatMoney(totalEarnings)}</p>
+                    </div>
+                    <div className="rounded-xl bg-black/20 p-3">
+                        <p className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
+                            <span className="w-2 h-2 rounded-full bg-rose-400" aria-hidden="true"></span>Gastos
+                        </p>
+                        <p className="text-lg font-bold text-rose-400 mt-0.5">{formatMoney(totalExpenses)}</p>
+                    </div>
+                </div>
+            </section>
+
+            {/* Expenses */}
+            <section>
+                <div className="flex justify-between items-center mb-3">
+                    <h3 className="text-lg font-bold text-white">Gastos</h3>
+                    <button
+                        onClick={(e) => { e.stopPropagation(); setShowExpenseModal(true); }}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 text-sm font-semibold transition-colors active:scale-95"
+                    >
+                        <NavIcon d="M12 4.5v15m7.5-7.5h-15" className="w-4 h-4" />
+                        Agregar
+                    </button>
+                </div>
+                {periodExpenses.length > 0 ? (
+                    <ul className="rounded-xl bg-[#181828] border border-slate-700/50 divide-y divide-slate-700/50">
+                        {periodExpenses.map(e => (
+                            <li key={e.id} className="relative flex justify-between items-center gap-3 pl-4 pr-2 py-3">
+                                <div className="min-w-0">
+                                    <p className="font-semibold text-white truncate">{e.description}</p>
+                                    <p className="text-xs text-slate-400">{new Date(e.created_at || Date.now()).toLocaleDateString('es-AR', { day: 'numeric', month: 'short' })}</p>
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0">
+                                    <span className="text-rose-400 font-bold">-{formatMoney(Number(e.amount))}</span>
+                                    <button
+                                        onClick={(event) => { event.stopPropagation(); toggleMenu(e.id); }}
+                                        aria-label={`Opciones de ${e.description}`}
+                                        aria-expanded={openMenuId === e.id}
+                                        className="p-2.5 text-slate-400 hover:text-white rounded-full hover:bg-slate-700 transition-colors"
+                                    >
+                                        <NavIcon d={DOTS_ICON} className="w-5 h-5" />
+                                    </button>
+                                </div>
                                 {openMenuId === e.id && (
-                                    <div className="absolute right-4 top-12 bg-slate-800 border border-slate-700 shadow-xl rounded-xl overflow-hidden z-10 w-32 animate-fade-in-down">
-                                        <button
-                                            onClick={(event) => { event.stopPropagation(); handleEditClick(e); }}
-                                            className="w-full text-left px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white flex items-center gap-2"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M5.433 13.917l1.262-3.155A4 4 0 017.58 9.42l6.92-6.918a2.121 2.121 0 013 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 01-.65-.65z" /><path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0010 3H4.75A2.75 2.75 0 002 5.75v9.5A2.75 2.75 0 004.75 18h9.5A2.75 2.75 0 0017 15.25V10a.75.75 0 00-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5z" /></svg>
-                                            Editar
-                                        </button>
-                                        <button
-                                            onClick={(event) => { event.stopPropagation(); handleDeleteClick(e.id); }}
-                                            className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-slate-700 hover:text-red-300 flex items-center gap-2 border-t border-slate-700/50"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" /></svg>
-                                            Eliminar
-                                        </button>
+                                    <div className="absolute right-2 top-12 bg-slate-800 border border-slate-700 shadow-xl rounded-xl overflow-hidden z-10 w-36 animate-fade-in-down">
+                                        <button onClick={(event) => { event.stopPropagation(); handleEditClick(e); }} className="w-full text-left px-4 py-3 text-sm text-slate-200 hover:bg-slate-700">Editar</button>
+                                        <button onClick={(event) => { event.stopPropagation(); setPendingDelete({ kind: 'expense', id: e.id, label: e.description }); setOpenMenuId(null); }} className="w-full text-left px-4 py-3 text-sm text-rose-400 hover:bg-slate-700 border-t border-slate-700/50">Eliminar</button>
                                     </div>
                                 )}
-                            </div>
-                        </div>
-                    ))}
-                    {expenses.length === 0 && <p className="text-slate-500 text-center py-4 italic">No hay gastos registrados.</p>}
-                </div>
-            </div>
+                            </li>
+                        ))}
+                    </ul>
+                ) : (
+                    <EmptyState text={month ? 'No hay gastos este mes.' : 'No hay gastos registrados.'} />
+                )}
+            </section>
 
-            {/* Paid Turns List */}
-            <div className="pt-6 border-t border-slate-800">
-                <h3 className="text-xl font-bold text-white mb-4">Ingresos (Turnos Cobrados)</h3>
-                <div className="space-y-3">
-                    {paidTurns.map(t => (
-                        <div key={t.id} className="bg-slate-800/30 p-4 rounded-xl flex justify-between items-center relative group hover:bg-slate-800 transition-colors">
-                            <div>
-                                <p className="font-bold text-slate-300">{t.clientName}</p>
-                                <p className="text-xs text-slate-500">{new Date(t.dateTime).toLocaleDateString('es-AR')}</p>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                <span className="text-green-500/80 font-bold">+${(t.estimatedPrice || 0).toLocaleString('es-AR')}</span>
-                                {/* Menu Trigger */}
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        setOpenPaidMenuId(openPaidMenuId === t.id ? null : t.id);
-                                    }}
-                                    className="p-1 text-slate-500 hover:text-white rounded-full hover:bg-slate-700 transition-colors"
-                                >
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z" />
-                                    </svg>
-                                </button>
-                                {/* Dropdown Menu */}
-                                {openPaidMenuId === t.id && (
-                                    <div className="absolute right-4 top-12 bg-slate-800 border border-slate-700 shadow-xl rounded-xl overflow-hidden z-10 w-48 animate-fade-in-down">
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onPaidChange(t.id, false);
-                                                setOpenPaidMenuId(null);
-                                            }}
-                                            className="w-full text-left px-4 py-3 text-sm text-yellow-500 hover:bg-slate-700 hover:text-yellow-400 flex items-center gap-2"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>
-                                            Anular Cobro
-                                        </button>
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onDeleteTurn(t.id);
-                                                setOpenPaidMenuId(null);
-                                            }}
-                                            className="w-full text-left px-4 py-3 text-sm text-red-500 hover:bg-slate-700 hover:text-red-400 flex items-center gap-2 border-t border-slate-700/50"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-                                            Eliminar Turno
-                                        </button>
+            {/* Income: paid turns */}
+            <section>
+                <h3 className="text-lg font-bold text-white mb-3">Ingresos</h3>
+                {paidTurns.length > 0 ? (
+                    <ul className="rounded-xl bg-[#181828] border border-slate-700/50 divide-y divide-slate-700/50">
+                        {paidTurns.map(t => (
+                            <li key={t.id} className="relative flex justify-between items-center gap-3 pl-4 pr-2 py-3">
+                                <div className="min-w-0">
+                                    <p className="font-semibold text-white truncate">{t.clientName}</p>
+                                    <p className="text-xs text-slate-400 truncate">
+                                        {new Date(t.dateTime).toLocaleDateString('es-AR', { day: 'numeric', month: 'short' })}
+                                        {t.task ? ` · ${t.task}` : ''}
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0">
+                                    <span className="text-emerald-400 font-bold">+{formatMoney(t.estimatedPrice || 0)}</span>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); toggleMenu(t.id); }}
+                                        aria-label={`Opciones del cobro de ${t.clientName}`}
+                                        aria-expanded={openMenuId === t.id}
+                                        className="p-2.5 text-slate-400 hover:text-white rounded-full hover:bg-slate-700 transition-colors"
+                                    >
+                                        <NavIcon d={DOTS_ICON} className="w-5 h-5" />
+                                    </button>
+                                </div>
+                                {openMenuId === t.id && (
+                                    <div className="absolute right-2 top-12 bg-slate-800 border border-slate-700 shadow-xl rounded-xl overflow-hidden z-10 w-44 animate-fade-in-down">
+                                        <button onClick={(e) => { e.stopPropagation(); onPaidChange(t.id, false); setOpenMenuId(null); }} className="w-full text-left px-4 py-3 text-sm text-amber-400 hover:bg-slate-700">Anular cobro</button>
+                                        <button onClick={(e) => { e.stopPropagation(); setPendingDelete({ kind: 'turn', id: t.id, label: t.clientName }); setOpenMenuId(null); }} className="w-full text-left px-4 py-3 text-sm text-rose-400 hover:bg-slate-700 border-t border-slate-700/50">Eliminar turno</button>
                                     </div>
                                 )}
-                            </div>
-                        </div>
-                    ))}
-                    {paidTurns.length === 0 && <p className="text-slate-500 text-center py-2 italic text-sm">No hay ingresos registrados aún.</p>}
-                </div>
-            </div>
+                            </li>
+                        ))}
+                    </ul>
+                ) : (
+                    <EmptyState text={month ? 'No hay turnos cobrados este mes.' : 'No hay ingresos registrados aún.'} />
+                )}
+            </section>
+
+            <ConfirmDialog
+                open={!!pendingDelete}
+                title={pendingDelete?.kind === 'turn' ? '¿Eliminar turno?' : '¿Eliminar gasto?'}
+                message={pendingDelete
+                    ? pendingDelete.kind === 'turn'
+                        ? `Se borrará el turno cobrado de ${pendingDelete.label}. No se puede deshacer.`
+                        : `Se borrará el gasto "${pendingDelete.label}". No se puede deshacer.`
+                    : undefined}
+                confirmLabel="Eliminar"
+                onCancel={() => setPendingDelete(null)}
+                onConfirm={() => {
+                    if (pendingDelete?.kind === 'turn') onDeleteTurn(pendingDelete.id);
+                    else if (pendingDelete) onDeleteExpense(pendingDelete.id);
+                    setPendingDelete(null);
+                }}
+            />
 
             {/* Expense Modal (Create/Edit) */}
             {showExpenseModal && (
@@ -816,12 +791,12 @@ const StatsView = ({
                         <h3 className="text-xl font-bold mb-4 text-white">{editingExpenseId ? 'Editar Gasto' : 'Nuevo Gasto'}</h3>
                         <div className="space-y-4 mb-6">
                             <div>
-                                <label className="block text-sm font-bold text-slate-400 mb-1">Descripción</label>
-                                <input className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 outline-none" placeholder="Ej. Esmaltes" value={desc} onChange={e => setDesc(e.target.value)} required autoFocus />
+                                <label htmlFor="expense-desc" className="block text-sm font-bold text-slate-400 mb-1">Descripción</label>
+                                <input id="expense-desc" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 outline-none" placeholder="Ej. Esmaltes" value={desc} onChange={e => setDesc(e.target.value)} required autoFocus />
                             </div>
                             <div>
-                                <label className="block text-sm font-bold text-slate-400 mb-1">Monto</label>
-                                <input className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 outline-none" type="number" placeholder="$0" value={amount} onChange={e => setAmount(e.target.value)} required />
+                                <label htmlFor="expense-amount" className="block text-sm font-bold text-slate-400 mb-1">Monto</label>
+                                <input id="expense-amount" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 outline-none" type="number" inputMode="decimal" placeholder="$0" value={amount} onChange={e => setAmount(e.target.value)} required />
                             </div>
                         </div>
                         <div className="flex gap-2">
@@ -833,5 +808,10 @@ const StatsView = ({
             )}
         </div>
     );
-
 };
+
+const EmptyState = ({ text }: { text: string }) => (
+    <div className="rounded-xl border border-dashed border-slate-700 py-8 text-center text-sm text-slate-400">
+        {text}
+    </div>
+);

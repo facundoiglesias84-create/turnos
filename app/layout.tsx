@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, Outfit } from "next/font/google";
 import "./globals.css";
-import { Providers } from "@/components/providers";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -26,8 +25,6 @@ export const viewport = {
   themeColor: "#0f172a",
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false, // user-scalable=0 maps to false
 };
 
 export default function RootLayout({
@@ -38,10 +35,8 @@ export default function RootLayout({
   return (
     <html lang="es">
       <body className={`${inter.className} ${outfit.variable}`}>
-        <Providers>
-          <ServiceWorkerRegister />
-          {children}
-        </Providers>
+        <ServiceWorkerRegister />
+        {children}
       </body>
     </html>
   );
